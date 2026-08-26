@@ -47,7 +47,7 @@ export class MemoryService {
   private readonly clock: () => string;
   private readonly lockTimeoutMs: number;
   private queue: Promise<unknown> = Promise.resolve();
-  private readonly ready: Promise<void>;
+  private ready?: Promise<void>;
   private readonly consolidator?: CursorConsolidator;
 
   constructor(options: MemoryServiceOptions = {}) {
@@ -58,26 +58,33 @@ export class MemoryService {
     this.lockTimeoutMs = options.lockTimeoutMs ?? 30_000;
     if (this.lockTimeoutMs < 30_000 || !Number.isFinite(this.lockTimeoutMs)) throw new Error('Configured workspace lock timeout must be at least 30000ms');
     if (options.compressor) this.consolidator = new CursorConsolidator({ paths: this.paths, compressor: options.compressor, clock: this.clock, lockTimeoutMs: this.lockTimeoutMs });
-    const startup = withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); }, this.lockTimeoutMs);
-    startup.catch(() => undefined);
-    this.ready = startup;
   }
 
-  list(category?: Parameters<MemoryReader['list']>[0]) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.list(category); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
-  read(path: string) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.read(path); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
-  search(query: string, limit?: number) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.search(query, limit); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
-  async readProfile(): Promise<string> { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.profile, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
-  async readIndex(): Promise<string> { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.index, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
+  /** Startup is owned by the service and begins only when a real operation needs it. */
+  private ensureReady(): Promise<void> {
+    if (!this.ready) {
+      const startup = withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); }, this.lockTimeoutMs);
+      startup.catch(() => undefined);
+      this.ready = startup;
+    }
+    return this.ready;
+  }
+
+  list(category?: Parameters<MemoryReader['list']>[0]) { return this.ensureReady().then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.list(category); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  read(path: string) { return this.ensureReady().then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.read(path); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  search(query: string, limit?: number) { return this.ensureReady().then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.search(query, limit); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  async readProfile(): Promise<string> { await this.ensureReady(); return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.profile, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
+  async readIndex(): Promise<string> { await this.ensureReady(); return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.index, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
   consume(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
     if (!this.consolidator) return Promise.reject(new Error('No compressor is configured'));
-    const operation = this.queue.then(async () => { await this.ready; await assertOperationalPaths(this.paths); return this.consolidator!.consume(events); });
+    const operation = this.queue.then(async () => { await this.ensureReady(); await assertOperationalPaths(this.paths); return this.consolidator!.consume(events); });
     this.queue = operation.catch(() => undefined); return operation;
   }
   consolidate(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> { return this.consume(events); }
 
   apply(proposal: MemoryProposal): Promise<MutationResult> {
     const parsed = ProposalSchema.parse(proposal);
-    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); return this.applyNow(parsed); }, this.lockTimeoutMs); });
+    const operation = this.queue.then(async () => { await this.ensureReady(); return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); return this.applyNow(parsed); }, this.lockTimeoutMs); });
     this.queue = operation.catch(() => undefined);
     return operation;
   }
@@ -85,7 +92,7 @@ export class MemoryService {
 
   async rememberExplicit(input: ExplicitMemoryInput | string): Promise<MutationResult> {
     const operation = this.queue.then(async () => {
-      await this.ready;
+      await this.ensureReady();
       return withWorkspaceLock(this.paths.root, async () => {
         await assertOperationalPaths(this.paths);
         await this.recoverPending();
