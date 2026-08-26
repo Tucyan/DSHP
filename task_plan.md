@@ -21,9 +21,9 @@ Phase 2
 
 ### Phase 2: Repository and Isolated Runtime Foundation
 
-- [ ] Initialize the TypeScript monorepo and feature branch
+- [x] Initialize the TypeScript monorepo and feature branch
 - [ ] Add isolated DSH launcher/configuration without modifying `~/.dsh` or `~/.agents`
-- [ ] Add shared contracts, configuration, test harness, and trace schema
+- [x] Add shared contracts, configuration, test harness, and trace schema
 - [ ] Verify the isolated baseline
 - **Status:** in_progress
 
