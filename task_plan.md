@@ -31,8 +31,8 @@ Phase 2
 
 - [x] Implement `personal-agent-core` using TDD
 - [x] Implement `personal-memory` using TDD
-- [ ] Implement `personal-heartbeat` using TDD
-- [ ] Run spec-compliance and code-quality reviews after every implementation task
+- [x] Implement `personal-heartbeat` using TDD
+- [x] Run spec-compliance and code-quality reviews after every implementation task
 - **Status:** pending
 
 ### Phase 4: Schedule and QQ Adapters

@@ -51,6 +51,8 @@
 | Persistence read APIs require Zod schemas | Syntactically valid but structurally invalid state must fail at the boundary rather than flow into domain logic |
 | Memory uses one recoverable workspace writer boundary | Consolidation, proposals, projections, cursors, and revisions share crash recovery and cannot overwrite one another |
 | Cordis service construction is filesystem-lazy | Bundle registration must not create project data or launch unowned asynchronous work before first use |
+| Heartbeat uses an exclusive owner file and token-specific tombstone release | Eliminates the owner-directory creation window and prevents an old owner from deleting a replacement lock |
+| v0.1 trusts the host workspace ancestry against malicious concurrent replacement | The project protects normal concurrency and accidental traversal; full hostile-process filesystem isolation was explicitly deferred |
 
 ## Issues Encountered
 
@@ -60,6 +62,7 @@
 | Live DSH and QQ may require downloads/credentials | Separate contract-level automated verification from optional live smoke tests |
 | Initial lint script only performed typechecking | Spec review caught it; added an actual ESLint flat configuration and exact dependencies |
 | No-config Memory plugin polluted the repository with a writer lock | Systematic debugging traced eager `MemoryService` construction; changed plugin and startup to lazy, caller-owned initialization |
+| Heartbeat lock contention exposed missing-owner and unsafe-release races | Replaced the lock directory protocol with an exclusive owner file, bounded transient retries, stale-owner proof, and atomic token tombstones |
 
 ## Resources
 

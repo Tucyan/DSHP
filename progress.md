@@ -45,6 +45,10 @@
   - Repeated spec and quality review loops hardened source-based replay dedupe, cross-instance locking, canonical/symlink-safe paths, CREATE/UPDATE/MERGE/ARCHIVE recovery, corrupt-ledger handling, projection escaping, Windows path portability, bounded sequence validation, and lock-free model callbacks.
   - Systematic debugging reproduced repository pollution from eager no-config plugin startup; added lifecycle regressions and changed plugin/service initialization to be filesystem-lazy.
   - Independently verified the final Memory state and confirmed no repository/package data-directory pollution.
+  - Implemented foreground/background Heartbeat with quiet hours, cooldown and daily contact caps, high-priority overrides, durable occurrence deduplication, reservations, hidden background actions, and Cordis packaging.
+  - Spec review passed; repeated quality review hardened cross-process locking, owner creation races, stale-lock recovery, ownership-safe tombstone release, strict persisted state, future timestamps, DST fall-back behavior, and foreground reentrancy.
+  - Documented the v0.1 host trust boundary: normal concurrency and accidental traversal are protected, while a malicious local process replacing workspace ancestors remains outside the deferred full-sandbox scope.
+  - Independently re-ran the final Heartbeat suite after review.
 - Files created/modified:
   - Git repository metadata and feature branch
   - Root pnpm/TypeScript/Vitest/ESLint configuration
@@ -60,6 +64,7 @@
 | Shared verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass | 4 files, 11 tests; all gates passed | pass |
 | Agent Core verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass | 9 files, 32 tests; all gates passed | pass |
 | Memory verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass; no pollution | 18 files, 82 tests; all gates passed | pass |
+| Heartbeat verification | package test plus reviewed root verification | policy, persistence, concurrency, lint/typecheck/build pass | 5 files, 25 package tests; reviewed root run 106 tests | pass |
 
 ## Error Log
 
@@ -70,6 +75,7 @@
 | 2026-08-26 | Lint command was only a typecheck alias | 1 | Added actual ESLint configuration and re-ran spec review |
 | 2026-08-27 | Recursive cleanup command was policy-blocked | 1 | Deleted generated owner files with apply_patch and removed only verified-empty exact directories via non-recursive .NET API |
 | 2026-08-27 | Memory plugin test created repository-local lock data | 1 | Reproduced eager constructor side effect, added failing lifecycle test, and made plugin/service initialization lazy |
+| 2026-08-27 | Ten-run Heartbeat concurrency loop reached the command time limit after nine successful runs | 1 | Did not retry per workspace instruction; retained the completed nine-run evidence plus the independently passing focused suite |
 
 ## 5-Question Reboot Check
 
