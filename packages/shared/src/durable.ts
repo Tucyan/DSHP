@@ -57,6 +57,26 @@ async function removeIfOwnerMatches(lockPath: string, token: string): Promise<bo
   return false;
 }
 
+type LockFileIdentity = { dev: number; ino: number };
+async function cleanupCreatedLock(lockPath: string, token: string, identity?: LockFileIdentity): Promise<void> {
+  if (identity) {
+    try {
+      const current = await fs.stat(lockPath);
+      // The path may only be unlinked when it is still the file opened by this
+      // acquisition. This protects a replacement owner from stale cleanup.
+      if (current.dev !== identity.dev || current.ino !== identity.ino) return;
+      await fs.unlink(lockPath);
+      return;
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+      // If metadata completed, the ownership-safe tombstone protocol can
+      // still cleanly remove it; otherwise retain the lock for manual review.
+    }
+  }
+  const removed = await removeIfOwnerMatches(lockPath, token);
+  if (!removed) throw new Error('durable lock cleanup could not prove ownership');
+}
+
 async function withLock<T>(lockPath: string, timeoutMs: number, operation: () => Promise<T>, hooks: DurableLockHooks = {}): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   const token = crypto.randomUUID();
@@ -69,19 +89,25 @@ async function withLock<T>(lockPath: string, timeoutMs: number, operation: () =>
         if (noFollow && openError && typeof openError === 'object' && 'code' in openError && openError.code === 'EINVAL') handle = await fs.open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
         else throw openError;
       }
+      const identity = await handle.stat().then((value) => ({ dev: value.dev, ino: value.ino })).catch(() => undefined);
       const owner = { token, pid: process.pid, createdAt: new Date().toISOString() } satisfies DurableLockOwner;
       try {
         if (hooks.ownerWrite) await hooks.ownerWrite(handle, owner);
         else { await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8'); await handle.sync(); }
       } catch (ownerError) {
-        // The exclusive handle proves this path was created by this attempt;
-        // remove it while still held so a failed write cannot strand a lock.
-        try { await fs.unlink(lockPath); } catch { await removeIfOwnerMatches(lockPath, token).catch(() => false); }
-        await handle.close().catch(() => undefined);
+        let closeError: unknown;
+        try { await handle.close(); } catch (error) { closeError = error; }
+        let cleanupError: unknown;
+        try { await cleanupCreatedLock(lockPath, token, identity); } catch (error) { cleanupError = error; }
+        if (closeError || cleanupError) throw new AggregateError([ownerError, closeError, cleanupError].filter(Boolean), 'durable lock owner initialization failed');
         throw ownerError;
       }
       try { if (hooks.ownerClose) await hooks.ownerClose(handle); else await handle.close(); }
-      catch (closeError) { await handle.close().catch(() => undefined); await removeIfOwnerMatches(lockPath, token); throw closeError; }
+      catch (closeError) {
+        await handle.close().catch(() => undefined);
+        await cleanupCreatedLock(lockPath, token, identity);
+        throw closeError;
+      }
       break;
     }
     catch (error) {

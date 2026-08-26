@@ -42,6 +42,11 @@ describe('runtime launcher isolation', () => {
     expect(script).toContain('corepack pnpm@11.7.0 build');
     expect(script.indexOf('corepack pnpm@11.7.0 build')).toBeLessThan(script.indexOf('render-qq-profile.mjs'));
     expect(script.indexOf('render-qq-profile.mjs')).toBeLessThan(script.indexOf('dsh plugin --profile web add'));
+    expect(script).toContain('--disabled');
+    expect(script).toContain('$installationSucceeded = $false');
+    expect(script).toContain('else { Write-AtomicText $profilePatch $disabledProfile }');
+    expect(script.indexOf('Write-AtomicText $profilePatch $disabledProfile')).toBeLessThan(script.indexOf('dsh plugin --profile web add'));
+    expect(script.indexOf('finally {', script.indexOf('$installationSucceeded = $false'))).toBeGreaterThan(script.indexOf('$installationSucceeded = $false'));
     const launcher = readFileSync(path.resolve('scripts/start-runtime.ps1'), 'utf8');
     expect(launcher).not.toMatch(/&\s+dsh(?:\s|$)/i);
     expect(launcher).toContain('if ($LASTEXITCODE -ne 0)');

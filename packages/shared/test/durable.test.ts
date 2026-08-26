@@ -50,4 +50,27 @@ describe('durable JSON transactions', () => {
     })).rejects.toThrow(/owner close failure/i);
     await expect(readFile(`${statePath}.lock`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('waits through a transient half-written owner and serializes the contender', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-transient-owner-'));
+    const statePath = path.join(root, 'state.json');
+    let release!: () => void;
+    const halfWritten = new Promise<void>((resolve) => { release = resolve; });
+    const first = durableJsonTransaction(statePath, root, schema, { id: 'initial' }, (state) => { state.id = 'first'; }, 30_000, {
+      ownerWrite: async (handle, owner) => {
+        await handle.write('{', 0, 'utf8');
+        await new Promise<void>((resolve) => { halfWritten.then(resolve); });
+        await handle.truncate(0);
+        await handle.write(`${JSON.stringify(owner)}\n`, 0, 'utf8');
+        await handle.sync();
+      },
+    });
+    // Let the first creator publish the incomplete owner before starting the contender.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = durableJsonTransaction(statePath, root, schema, { id: 'initial' }, (state) => { state.id = 'second'; });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    release();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(['first', 'second']).toContain(JSON.parse(await readFile(statePath, 'utf8')).id);
+  });
 });

@@ -18,6 +18,8 @@ $profilePatch = Join-Path $config.dshHome 'profiles/web/cordis.patch.yml'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePatch) | Out-Null
 $patchText = (& node (Join-Path $PSScriptRoot 'render-qq-profile.mjs') --peer-id $PeerId | Out-String).TrimEnd()
 if ($LASTEXITCODE -ne 0) { throw "QQ profile rendering failed with exit code $LASTEXITCODE" }
+$disabledPatchText = (& node (Join-Path $PSScriptRoot 'render-qq-profile.mjs') --peer-id $PeerId --disabled | Out-String).TrimEnd()
+if ($LASTEXITCODE -ne 0) { throw "QQ disabled profile rendering failed with exit code $LASTEXITCODE" }
 $marker = 'Personal Growth Agent QQ profile'
 function Write-AtomicText([string]$path, [string]$content) {
   $temp = "$path.$PID.tmp"
@@ -27,23 +29,35 @@ function Write-AtomicText([string]$path, [string]$content) {
 if (Test-Path -LiteralPath $profilePatch) {
   $existingPatch = Get-Content -LiteralPath $profilePatch -Raw
   if ($existingPatch.Contains($marker)) {
-    & node (Join-Path $PSScriptRoot 'validate-qq-profile.mjs') --file $profilePatch --peer-id $PeerId
+    & node (Join-Path $PSScriptRoot 'validate-qq-profile.mjs') --file $profilePatch --peer-id $PeerId --allow-disabled
     if ($LASTEXITCODE -ne 0) { throw 'managed QQ profile binding mismatch' }
+    $profilePrefix = ''
   } elseif ($existingPatch -match '(?m)^\s*-\s+id:\s+im-qqbot\s*$') {
     throw 'existing QQ profile contains an unmanaged im-qqbot row'
   } else {
-    Write-AtomicText $profilePatch (($existingPatch.TrimEnd() + "`n" + $patchText + "`n"))
+    $profilePrefix = $existingPatch.TrimEnd() + "`n"
   }
 } else {
-  Write-AtomicText $profilePatch ($patchText + "`n")
+  $profilePrefix = ''
 }
-Push-Location $config.workspace
+$enabledProfile = $profilePrefix + $patchText + "`n"
+$disabledProfile = $profilePrefix + $disabledPatchText + "`n"
+# Establish the fail-closed profile before the first plugin installation.
+Write-AtomicText $profilePatch $disabledProfile
+$installationSucceeded = $false
 try {
-  foreach ($bundle in @('packages/agent-core','packages/personal-memory','packages/personal-heartbeat')) {
-    & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh plugin --profile web add (Join-Path $repo $bundle)
-    if ($LASTEXITCODE -ne 0) { throw "Self bundle installation failed for $bundle with exit code $LASTEXITCODE" }
-  }
-  & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh plugin --profile web add '@tencent-connect/dsh-qqbot@0.4.0'
-  if ($LASTEXITCODE -ne 0) { throw "Tencent QQ bundle installation failed with exit code $LASTEXITCODE" }
-} finally { Pop-Location }
+  Push-Location $config.workspace
+  try {
+    foreach ($bundle in @('packages/agent-core','packages/personal-memory','packages/personal-heartbeat')) {
+      & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh plugin --profile web add (Join-Path $repo $bundle)
+      if ($LASTEXITCODE -ne 0) { throw "Self bundle installation failed for $bundle with exit code $LASTEXITCODE" }
+    }
+    & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh plugin --profile web add '@tencent-connect/dsh-qqbot@0.4.0'
+    if ($LASTEXITCODE -ne 0) { throw "Tencent QQ bundle installation failed with exit code $LASTEXITCODE" }
+  } finally { Pop-Location }
+  $installationSucceeded = $true
+} finally {
+  if ($installationSucceeded) { Write-AtomicText $profilePatch $enabledProfile }
+  else { Write-AtomicText $profilePatch $disabledProfile }
+}
 Write-Output 'Installed the pinned Tencent QQ bundle into the isolated DSH web profile.'
