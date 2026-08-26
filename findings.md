@@ -53,6 +53,9 @@
 | Cordis service construction is filesystem-lazy | Bundle registration must not create project data or launch unowned asynchronous work before first use |
 | Heartbeat uses an exclusive owner file and token-specific tombstone release | Eliminates the owner-directory creation window and prevents an old owner from deleting a replacement lock |
 | v0.1 trusts the host workspace ancestry against malicious concurrent replacement | The project protects normal concurrency and accidental traversal; full hostile-process filesystem isolation was explicitly deferred |
+| QQ installation uses disabled-before-install, enabled-after-success profile states | Any partial bundle installation remains fail-closed instead of exposing Tencent's open defaults |
+| Adapter state uses cross-process owner-file transactions | QQ delivery and Schedule bindings retain idempotency across simultaneous instances and restarts |
+| Unknown external outcomes require explicit reconciliation | A network send or live Schedule create that may have succeeded is never retried blindly |
 
 ## Issues Encountered
 
@@ -63,6 +66,8 @@
 | Initial lint script only performed typechecking | Spec review caught it; added an actual ESLint flat configuration and exact dependencies |
 | No-config Memory plugin polluted the repository with a writer lock | Systematic debugging traced eager `MemoryService` construction; changed plugin and startup to lazy, caller-owned initialization |
 | Heartbeat lock contention exposed missing-owner and unsafe-release races | Replaced the lock directory protocol with an exclusive owner file, bounded transient retries, stale-owner proof, and atomic token tombstones |
+| Initial adapters passed functional tests but lost updates across reconstructed instances | Added shared strict durable transactions, ownership-safe locking, post-mutation schema validation, and concurrency regressions |
+| Tencent's empty allowlist is not fail-closed | Added a disabled default patch and a two-phase managed single-peer overlay |
 
 ## Resources
 

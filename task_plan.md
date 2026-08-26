@@ -6,7 +6,7 @@ Build and verify a single-user Personal Growth Agent v0.1 on an isolated DSH ins
 
 ## Current Phase
 
-Phase 2
+Phase 5
 
 ## Phases
 
@@ -22,10 +22,10 @@ Phase 2
 ### Phase 2: Repository and Isolated Runtime Foundation
 
 - [x] Initialize the TypeScript monorepo and feature branch
-- [ ] Add isolated DSH launcher/configuration without modifying `~/.dsh` or `~/.agents`
+- [x] Add isolated DSH launcher/configuration without modifying `~/.dsh` or `~/.agents`
 - [x] Add shared contracts, configuration, test harness, and trace schema
-- [ ] Verify the isolated baseline
-- **Status:** in_progress
+- [x] Verify the isolated baseline
+- **Status:** complete
 
 ### Phase 3: Core, Memory, and Heartbeat Plugins
 
@@ -33,15 +33,15 @@ Phase 2
 - [x] Implement `personal-memory` using TDD
 - [x] Implement `personal-heartbeat` using TDD
 - [x] Run spec-compliance and code-quality reviews after every implementation task
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 4: Schedule and QQ Adapters
 
-- [ ] Integrate DSH Schedule through an adapter and durable bindings
-- [ ] Integrate a single-user QQ text channel and proactive send path
-- [ ] Provide local fake adapters when external credentials/services are unavailable
-- [ ] Verify restart persistence and authorization boundaries
-- **Status:** pending
+- [x] Integrate DSH Schedule through an adapter and durable bindings
+- [x] Integrate a single-user QQ text channel and proactive send path
+- [x] Provide local fake adapters when external credentials/services are unavailable
+- [x] Verify restart persistence and authorization boundaries
+- **Status:** complete
 
 ### Phase 5: End-to-End Autonomous Loop
 
@@ -50,7 +50,7 @@ Phase 2
 - [ ] Connect schedule and QQ proactive messaging
 - [ ] Add Skill creation and Plugin proposal workflows with approval boundaries
 - [ ] Add trace queries and hidden-background-session behavior
-- **Status:** pending
+- **Status:** in_progress
 
 ### Phase 6: Verification, Documentation, and Handoff
 

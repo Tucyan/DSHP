@@ -49,6 +49,10 @@
   - Spec review passed; repeated quality review hardened cross-process locking, owner creation races, stale-lock recovery, ownership-safe tombstone release, strict persisted state, future timestamps, DST fall-back behavior, and foreground reentrancy.
   - Documented the v0.1 host trust boundary: normal concurrency and accidental traversal are protected, while a malicious local process replacing workspace ancestors remains outside the deferred full-sandbox scope.
   - Independently re-ran the final Heartbeat suite after review.
+  - Added durable DSH Schedule and QQ adapters with local fakes, restart-safe bindings, cross-instance idempotency, explicit unknown-outcome reconciliation, and strict single-user/background-message gates.
+  - Added an isolated DSH runtime initializer, canonical path verifier, project-pinned launcher, two-phase fail-closed QQ bundle installer, profile overlays, and credential-free dry-run checks.
+  - Repeated specification and quality review loops hardened Tencent profile composition, fresh-checkout build ordering, cross-process locks, network ambiguity, strict schemas, symlink boundaries, and partial-install rollback.
+  - Independently verified the final adapter state and canonical isolation.
 - Files created/modified:
   - Git repository metadata and feature branch
   - Root pnpm/TypeScript/Vitest/ESLint configuration
@@ -65,6 +69,7 @@
 | Agent Core verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass | 9 files, 32 tests; all gates passed | pass |
 | Memory verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass; no pollution | 18 files, 82 tests; all gates passed | pass |
 | Heartbeat verification | package test plus reviewed root verification | policy, persistence, concurrency, lint/typecheck/build pass | 5 files, 25 package tests; reviewed root run 106 tests | pass |
+| DSH/QQ adapter verification | root verify plus isolation verifier | adapters, scripts, lint/typecheck/test/build and canonical isolation pass | 32 files, 157 tests; all gates passed | pass |
 
 ## Error Log
 
@@ -76,13 +81,14 @@
 | 2026-08-27 | Recursive cleanup command was policy-blocked | 1 | Deleted generated owner files with apply_patch and removed only verified-empty exact directories via non-recursive .NET API |
 | 2026-08-27 | Memory plugin test created repository-local lock data | 1 | Reproduced eager constructor side effect, added failing lifecycle test, and made plugin/service initialization lazy |
 | 2026-08-27 | Ten-run Heartbeat concurrency loop reached the command time limit after nine successful runs | 1 | Did not retry per workspace instruction; retained the completed nine-run evidence plus the independently passing focused suite |
+| 2026-08-27 | DSH CLI help initialized an isolated temporary profile and cleanup hit Windows access denial | 1 | Did not retry or change permissions; retained only ignored `runtime/_help-dsh-home` and recorded the exact manual cleanup path |
 
 ## 5-Question Reboot Check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 2: building the repository and isolated runtime foundation |
-| Where am I going? | Foundation, plugins, adapters, end-to-end verification, handoff |
+| Where am I? | Phase 5: composing and proving the end-to-end autonomous loop |
+| Where am I going? | Runtime integration, final verification, documentation, handoff |
 | What's the goal? | A verified Personal Growth Agent v0.1 on an isolated DSH instance |
 | What have I learned? | See `findings.md` |
 | What have I done? | Captured requirements, constraints, toolchain, and current workspace state |
