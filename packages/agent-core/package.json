@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "test": "vitest run packages/agent-core/test",
+    "test": "vitest run --root ../.. packages/agent-core/test",
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.json"
   },

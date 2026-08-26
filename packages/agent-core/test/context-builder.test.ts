@@ -24,10 +24,9 @@ describe('ContextBuilder', () => {
     expect(context.text).toContain('PROFILE\nThe user prefers concise plans.');
     expect(context.text.indexOf('SOUL')).toBeLessThan(context.text.indexOf('MISSION'));
     expect(context.text.indexOf('MISSION')).toBeLessThan(context.text.indexOf('PROFILE'));
-    expect(context.text.indexOf('PROFILE')).toBeLessThan(context.text.indexOf('MEMORY'));
-    expect(context.text.indexOf('MEMORY')).toBeLessThan(context.text.indexOf('GOAL'));
-    expect(context.text.indexOf('GOAL')).toBeLessThan(context.text.indexOf('SESSION_DELTA'));
-    expect(context.text.indexOf('SESSION_DELTA')).toBeLessThan(context.text.indexOf('TRIGGER'));
+    const sectionOrder = ['SOUL', 'MISSION', 'PROFILE', 'MEMORY', 'SESSION_DELTA', 'GOAL', 'TRIGGER'];
+    const positions = sectionOrder.map((section) => context.text.indexOf(section));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
   it('truncates lower-priority content deterministically within a UTF-8 budget', () => {

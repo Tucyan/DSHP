@@ -80,8 +80,8 @@ export class ContextBuilder {
       { name: 'MISSION', value: input.mission, required: true, priority: 90 },
       { name: 'PROFILE', value: input.profile ?? '', required: false, priority: 70 },
       { name: 'MEMORY', value: (input.memories ?? []).join('\n'), required: false, priority: 50 },
-      { name: 'GOAL', value: input.currentGoal ?? '', required: false, priority: 60 },
       { name: 'SESSION_DELTA', value: input.sessionDelta ?? '', required: false, priority: 40 },
+      { name: 'GOAL', value: input.currentGoal ?? '', required: false, priority: 60 },
       { name: 'TRIGGER', value: triggerText(input.trigger), required: true, priority: 110 },
     ];
 
