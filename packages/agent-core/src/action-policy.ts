@@ -17,7 +17,6 @@ export class PolicyViolation extends Error {
     this.action = action;
   }
 }
-
 const allowedByTrigger: Record<AgentTrigger['type'], readonly AgentAction['type'][]> = {
   user_message: ['RESPOND', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN'],
   foreground_heartbeat: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
@@ -54,4 +53,3 @@ export function isActionAllowed(trigger: unknown, action: unknown): action is Ag
     return false;
   }
 }
-
