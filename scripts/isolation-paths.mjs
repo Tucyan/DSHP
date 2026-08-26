@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(process.env.PGA_REPO_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
