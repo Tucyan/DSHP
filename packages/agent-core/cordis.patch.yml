@@ -1,0 +1,5 @@
+bundle:
+  rows:
+    - id: personal-growth-agent-core
+      package: '@personal-growth/agent-core'
+      entry: dist/plugin.js

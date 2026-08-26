@@ -1,0 +1,53 @@
+import { describe, expect, it } from 'vitest';
+import { AgentTrigger } from '@personal-growth/shared';
+import { ContextBuilder } from '../src/context-builder.js';
+
+const trigger: AgentTrigger = {
+  type: 'user_message',
+  sessionId: 'session-1',
+  text: 'Please help',
+  at: '2026-08-26T00:00:00.000Z',
+};
+
+describe('ContextBuilder', () => {
+  it('includes sections in a stable order, including PROFILE', () => {
+    const context = new ContextBuilder({ byteBudget: 10_000 }).build({
+      soul: 'I am kind.',
+      mission: 'Help the user grow.',
+      profile: 'The user prefers concise plans.',
+      memories: ['Memory A', 'Memory B'],
+      sessionDelta: 'The user is choosing a habit.',
+      currentGoal: 'Exercise three times weekly.',
+      trigger,
+    });
+
+    expect(context.text).toContain('PROFILE\nThe user prefers concise plans.');
+    expect(context.text.indexOf('SOUL')).toBeLessThan(context.text.indexOf('MISSION'));
+    expect(context.text.indexOf('MISSION')).toBeLessThan(context.text.indexOf('PROFILE'));
+    expect(context.text.indexOf('PROFILE')).toBeLessThan(context.text.indexOf('MEMORY'));
+    expect(context.text.indexOf('MEMORY')).toBeLessThan(context.text.indexOf('GOAL'));
+    expect(context.text.indexOf('GOAL')).toBeLessThan(context.text.indexOf('SESSION_DELTA'));
+    expect(context.text.indexOf('SESSION_DELTA')).toBeLessThan(context.text.indexOf('TRIGGER'));
+  });
+
+  it('truncates lower-priority content deterministically within a UTF-8 budget', () => {
+    const input = {
+      soul: '核心人格',
+      mission: '帮助用户成长',
+      profile: '用户档案应该被裁剪',
+      memories: ['旧记忆一', '旧记忆二'],
+      currentGoal: '当前目标',
+      sessionDelta: '会话变化内容',
+      trigger,
+    };
+    const builder = new ContextBuilder({ byteBudget: 150 });
+    const first = builder.build(input);
+    const second = builder.build(input);
+
+    expect(Buffer.byteLength(first.text, 'utf8')).toBeLessThanOrEqual(150);
+    expect(first.text).toBe(second.text);
+    expect(first.text).toContain('核心人格');
+    expect(first.text).toContain('帮助用户成长');
+    expect(first.text).toContain('TRIGGER');
+  });
+});
