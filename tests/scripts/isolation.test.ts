@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -17,11 +18,25 @@ describe('runtime launcher isolation', () => {
     const script = path.resolve('scripts/start-runtime.ps1');
     const result = execFileSync('pwsh', ['-NoProfile', '-File', script, '-DryRun'], { encoding: 'utf8', env: { ...process.env, PGA_REPO_ROOT: process.cwd() } });
     const launch = JSON.parse(result) as { command: string; cwd: string; args: string[]; env: Record<string, string> };
-    expect(launch.command).toBe('dsh');
+    expect(launch.command).toBe('corepack');
     expect(launch.cwd).toBe(path.resolve('workspace'));
-    expect(launch.args).toEqual(['web', '--port', '3180']);
+    expect(launch.args).toEqual(['pnpm@11.7.0', '--filter', '@personal-growth/dsh-adapter', 'exec', 'dsh', 'web', '--port', '3180']);
     for (const key of ['DSH_HOME', 'DSH_AGENTS_HOME', 'PGA_PLUGINS_DIR', 'PGA_SKILLS_DIR', 'PGA_SESSIONS_DIR', 'PGA_STORAGE_DIR', 'PGA_CREDENTIALS_DIR']) expect(launch.env[key]).toContain(path.resolve('runtime').split(path.sep).join(path.sep));
     expect(launch.env.PGA_RUNTIME_ROOT).toBe(path.resolve('.'));
     expect(launch.env.DSH_WORKSPACE).toBe(path.resolve('workspace'));
+  });
+  it('audits opt-in installation against every local bundle and the pinned Tencent package', () => {
+    const script = readFileSync(path.resolve('scripts/install-runtime-bundles.ps1'), 'utf8');
+    for (const bundle of ['packages/agent-core', 'packages/personal-memory', 'packages/personal-heartbeat']) {
+      expect(script).toContain(bundle);
+    }
+    expect(script).toContain("@tencent-connect/dsh-qqbot@0.4.0");
+    expect(script).toContain('corepack pnpm@11.7.0');
+    expect(script).not.toMatch(/&\s+dsh(?:\s|$)/i);
+    expect(script).toMatch(/\$patchText\s*=\s*@"\r?\n# Personal Growth Agent QQ profile/);
+    expect(script).toContain('if ($LASTEXITCODE -ne 0)');
+    const launcher = readFileSync(path.resolve('scripts/start-runtime.ps1'), 'utf8');
+    expect(launcher).not.toMatch(/&\s+dsh(?:\s|$)/i);
+    expect(launcher).toContain('if ($LASTEXITCODE -ne 0)');
   });
 });
