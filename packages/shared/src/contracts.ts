@@ -23,17 +23,20 @@ export const AgentActionSchema = z.discriminatedUnion('type', [
 
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 
-const isBackgroundTrigger = (trigger: AgentTrigger): boolean => trigger.type === 'background_heartbeat';
+export const AgentTriggerActionMatrix = {
+  user_message: ['RESPOND', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN'],
+  foreground_heartbeat: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
+  background_heartbeat: ['NOOP', 'REFLECT', 'CREATE_SKILL', 'PROPOSE_PLUGIN'],
+  schedule: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
+  system: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
+} as const satisfies Record<AgentTrigger['type'], readonly AgentAction['type'][]>;
 
-const isUserVisibleAction = (action: AgentAction): boolean =>
-  action.type === 'RESPOND' || action.type === 'MESSAGE_USER';
-
-/** Returns false for malformed actions and for user-visible background actions. */
+/** Returns false for malformed actions and for actions outside the frozen trigger matrix. */
 export function isActionAllowedForTrigger(trigger: unknown, action: unknown): action is AgentAction {
   const parsedTrigger = AgentTriggerSchema.safeParse(trigger);
   if (!parsedTrigger.success) return false;
   const parsed = AgentActionSchema.safeParse(action);
-  return parsed.success && !(isBackgroundTrigger(parsedTrigger.data) && isUserVisibleAction(parsed.data));
+  return parsed.success && (AgentTriggerActionMatrix[parsedTrigger.data.type] as readonly AgentAction['type'][]).includes(parsed.data.type);
 }
 
 /** Validates and applies the trigger-aware action policy. */
@@ -42,8 +45,8 @@ export function assertActionAllowedForTrigger(trigger: unknown, action: unknown)
   if (!parsedTrigger.success) throw new Error(`Invalid agent trigger: ${parsedTrigger.error.message}`);
   const parsedAction = AgentActionSchema.safeParse(action);
   if (!parsedAction.success) throw new Error(`Invalid agent action: ${parsedAction.error.message}`);
-  if (isBackgroundTrigger(parsedTrigger.data) && isUserVisibleAction(parsedAction.data)) {
-    throw new Error('Background heartbeat cannot produce user-visible actions');
+  if (!(AgentTriggerActionMatrix[parsedTrigger.data.type] as readonly AgentAction['type'][]).includes(parsedAction.data.type)) {
+    throw new Error(`Action ${parsedAction.data.type} is not allowed for ${parsedTrigger.data.type}`);
   }
   return parsedAction.data;
 }

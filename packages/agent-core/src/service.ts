@@ -1,10 +1,12 @@
 import {
+  AgentActionSchema,
+  AgentTriggerSchema,
   redactSecrets,
   type AgentAction,
   type AgentTrigger,
   type TraceRecord,
 } from '@personal-growth/shared';
-import { assertActionAllowed } from './action-policy.js';
+import { assertActionAllowed, PolicyViolation } from './action-policy.js';
 import { ContextBuilder, type AgentContext, type ContextBuildInput } from './context-builder.js';
 
 export interface ContextSource {
@@ -69,21 +71,41 @@ export class AgentCore {
   }
 
   async handle(trigger: AgentTrigger): Promise<AgentAction> {
-    const sourceInput = await this.readContext(trigger);
-    const context = this.contextBuilder.build({ ...sourceInput, trigger });
-    const generated = await this.options.model.generateAction(context, trigger);
+    const parsedTrigger = AgentTriggerSchema.safeParse(trigger);
+    if (!parsedTrigger.success) {
+      await this.safeTrace('unknown', 'action.rejected', {
+        rawType: rawType(trigger),
+        reasonCode: 'invalid_trigger',
+        issueCount: parsedTrigger.error.issues.length,
+      });
+      throw new PolicyViolation('Invalid agent trigger', trigger, undefined);
+    }
+    const sourceInput = await this.readContext(parsedTrigger.data);
+    const context = this.contextBuilder.build({ ...sourceInput, trigger: parsedTrigger.data });
+    const generated = await this.options.model.generateAction(context, parsedTrigger.data);
     let action: AgentAction;
+    const parsedAction = AgentActionSchema.safeParse(generated);
+    if (!parsedAction.success) {
+      const error = new PolicyViolation('Invalid agent action', parsedTrigger.data, undefined);
+      await this.safeTrace(parsedTrigger.data.at, 'action.rejected', {
+        rawType: rawType(generated),
+        reasonCode: 'invalid_action',
+        issueCount: parsedAction.error.issues.length,
+      });
+      throw error;
+    }
     try {
-      // The shared action schema is parsed inside the policy boundary, so malformed
-      // model output can never reach an effect port.
-      action = assertActionAllowed(trigger, generated);
+      action = assertActionAllowed(parsedTrigger.data, parsedAction.data);
     } catch (error) {
-      await this.trace(trigger, 'action.rejected', { action: generated, reason: error instanceof Error ? error.message : String(error) });
+      await this.safeTrace(parsedTrigger.data.at, 'action.rejected', {
+        rawType: rawType(generated),
+        reasonCode: 'policy_violation',
+      });
       throw error;
     }
 
-    await this.trace(trigger, 'action.accepted', { action });
-    await this.execute(action, trigger);
+    await this.trace(parsedTrigger.data, 'action.accepted', { action });
+    await this.execute(action, parsedTrigger.data);
     return action;
   }
 
@@ -134,4 +156,18 @@ export class AgentCore {
   private async trace(trigger: AgentTrigger, event: string, data: unknown): Promise<void> {
     await (this.options.trace ?? defaultTrace).write(redactSecrets({ at: trigger.at, event, data }));
   }
+
+  private async safeTrace(at: string, event: string, data: unknown): Promise<void> {
+    try {
+      await (this.options.trace ?? defaultTrace).write({ at, event, data });
+    } catch {
+      // Rejection handling must not be made unsafe by an untrusted trace sink.
+    }
+  }
+}
+
+function rawType(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
 }

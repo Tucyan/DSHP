@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isActionAllowedForTrigger as isSharedActionAllowed } from '@personal-growth/shared';
 import { assertActionAllowed, PolicyViolation } from '../src/action-policy.js';
 
 const triggers = {
@@ -30,6 +31,7 @@ describe('trigger-aware action policy', () => {
       for (const [actionName, action] of Object.entries(actions) as [keyof typeof actions, (typeof actions)[keyof typeof actions]][]) {
         if (allowed.includes(actionName)) expect(assertActionAllowed(triggers[triggerName], action)).toEqual(action);
         else expect(() => assertActionAllowed(triggers[triggerName], action)).toThrow(PolicyViolation);
+        expect(isSharedActionAllowed(triggers[triggerName], action)).toBe(allowed.includes(actionName));
       }
     }
   });

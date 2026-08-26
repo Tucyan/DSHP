@@ -11,6 +11,22 @@ function makeModel(action: unknown) {
 }
 
 describe('AgentCore', () => {
+  it('rejects an invalid trigger before any context or model port runs', async () => {
+    let contextCalls = 0;
+    let modelCalls = 0;
+    const traces: unknown[] = [];
+    const core = new AgentCore({
+      contextSource: { getContext: async () => { contextCalls += 1; return { soul: 'soul', mission: 'mission', trigger }; } },
+      model: { generateAction: async () => { modelCalls += 1; return { type: 'NOOP', reason: 'none' }; } },
+      trace: { write: (record) => traces.push(record) },
+    });
+    await expect(core.handle({ type: 'invalid' } as never)).rejects.toThrow();
+    expect(contextCalls).toBe(0);
+    expect(modelCalls).toBe(0);
+    expect(traces).toHaveLength(1);
+    expect(traces[0]).toMatchObject({ event: 'action.rejected', data: { reasonCode: 'invalid_trigger' } });
+  });
+
   it('executes NOOP without side effects and traces accepted action', async () => {
     const traces: unknown[] = [];
     const core = new AgentCore({ contextSource, model: makeModel({ type: 'NOOP', reason: 'not now' }), trace: { write: (x) => traces.push(x) } });
@@ -62,5 +78,48 @@ describe('AgentCore', () => {
     await expect(forbidden.handle({ type: 'background_heartbeat', occurrenceId: 'b', at: 'now' })).rejects.toThrow();
     expect(delivered).toEqual([]);
     expect(traces[0]).toMatchObject({ event: 'action.rejected' });
+  });
+
+  it('traces only safe summaries for cyclic invalid model output', async () => {
+    const traces: unknown[] = [];
+    const cyclic: Record<string, unknown> = { type: 'BOGUS', password: 'must-not-leak' };
+    cyclic.self = cyclic;
+    const core = new AgentCore({ contextSource, model: makeModel(cyclic), trace: { write: (record) => traces.push(record) } });
+    await expect(core.handle(trigger)).rejects.toThrow();
+    expect(traces).toHaveLength(1);
+    expect(() => JSON.stringify(traces[0])).not.toThrow();
+    expect(traces[0]).toMatchObject({ data: { rawType: 'object', reasonCode: 'invalid_action' } });
+    expect(JSON.stringify(traces[0])).not.toContain('must-not-leak');
+    expect(JSON.stringify(traces[0])).not.toContain('password');
+  });
+
+  it('executes exactly one matching effect for each representative accepted action', async () => {
+    const cases = [
+      [trigger, { type: 'RESPOND', text: 'reply' }, 'response'],
+      [{ type: 'foreground_heartbeat', occurrenceId: 'f', at: 'now' }, { type: 'MESSAGE_USER', text: 'check in', importance: 'normal' }, 'userMessage'],
+      [trigger, { type: 'CREATE_SKILL', name: 'focus', instructions: 'focus' }, 'skill'],
+      [trigger, { type: 'PROPOSE_PLUGIN', name: 'calendar', capabilityGap: 'events', design: 'port' }, 'plugin'],
+      [{ type: 'background_heartbeat', occurrenceId: 'b', at: 'now' }, { type: 'REFLECT', summary: 'learned' }, 'reflection'],
+      [trigger, { type: 'NOOP', reason: 'none' }, 'noop'],
+    ] as const;
+    for (const [caseTrigger, action, expected] of cases) {
+      const effects = { response: 0, userMessage: 0, skill: 0, plugin: 0, reflection: 0, noop: 0 };
+      const core = new AgentCore({
+        contextSource,
+        model: makeModel(action),
+        response: { deliver: async () => { effects.response += 1; } },
+        userMessage: { deliver: async () => { effects.userMessage += 1; } },
+        skillWriter: { write: async () => { effects.skill += 1; } },
+        pluginWriter: { write: async () => { effects.plugin += 1; } },
+        reflection: { write: async () => { effects.reflection += 1; } },
+      });
+      await core.handle(caseTrigger);
+      if (expected === 'noop') {
+        expect(Object.values(effects).every((count) => count === 0)).toBe(true);
+      } else {
+        expect(Object.values(effects).filter((count) => count > 0)).toEqual([1]);
+        expect(effects[expected]).toBe(1);
+      }
+    }
   });
 });

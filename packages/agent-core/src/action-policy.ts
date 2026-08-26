@@ -1,8 +1,10 @@
 import {
   AgentActionSchema,
   AgentTriggerSchema,
+  AgentTriggerActionMatrix,
+  assertActionAllowedForTrigger,
+  isActionAllowedForTrigger,
   type AgentAction,
-  type AgentTrigger,
 } from '@personal-growth/shared';
 
 export class PolicyViolation extends Error {
@@ -17,13 +19,7 @@ export class PolicyViolation extends Error {
     this.action = action;
   }
 }
-const allowedByTrigger: Record<AgentTrigger['type'], readonly AgentAction['type'][]> = {
-  user_message: ['RESPOND', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN'],
-  foreground_heartbeat: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
-  background_heartbeat: ['NOOP', 'REFLECT', 'CREATE_SKILL', 'PROPOSE_PLUGIN'],
-  schedule: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
-  system: ['MESSAGE_USER', 'NOOP', 'CREATE_SKILL', 'PROPOSE_PLUGIN', 'REFLECT'],
-};
+export { AgentTriggerActionMatrix };
 
 export function assertActionAllowed(trigger: unknown, action: unknown): AgentAction {
   const parsedTrigger = AgentTriggerSchema.safeParse(trigger);
@@ -34,22 +30,15 @@ export function assertActionAllowed(trigger: unknown, action: unknown): AgentAct
   if (!parsedAction.success) {
     throw new PolicyViolation(`Invalid agent action: ${parsedAction.error.message}`, trigger, action);
   }
-  const allowed = allowedByTrigger[parsedTrigger.data.type];
-  if (!allowed.includes(parsedAction.data.type)) {
-    throw new PolicyViolation(
-      `Action ${parsedAction.data.type} is not allowed for ${parsedTrigger.data.type}`,
-      trigger,
-      action,
-    );
+  try {
+    return assertActionAllowedForTrigger(parsedTrigger.data, parsedAction.data);
+  } catch (error) {
+    throw new PolicyViolation(error instanceof Error ? error.message : 'Action policy rejected', trigger, action);
   }
-  return parsedAction.data;
 }
 
 export function isActionAllowed(trigger: unknown, action: unknown): action is AgentAction {
-  try {
-    assertActionAllowed(trigger, action);
-    return true;
-  } catch {
-    return false;
-  }
+  return isActionAllowedForTrigger(trigger, action);
 }
+
+export { isActionAllowedForTrigger };

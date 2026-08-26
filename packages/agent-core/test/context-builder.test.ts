@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AgentTrigger } from '@personal-growth/shared';
-import { ContextBuilder } from '../src/context-builder.js';
+import { ContextBudgetError, ContextBuilder, ContextValidationError } from '../src/context-builder.js';
 
 const trigger: AgentTrigger = {
   type: 'user_message',
@@ -48,5 +48,38 @@ describe('ContextBuilder', () => {
     expect(first.text).toContain('核心人格');
     expect(first.text).toContain('帮助用户成长');
     expect(first.text).toContain('TRIGGER');
+  });
+
+  it('exposes only bounded model-facing sections, not raw source fields', () => {
+    const context = new ContextBuilder({ byteBudget: 180 }).build({
+      soul: 'soul',
+      mission: 'mission',
+      profile: 'P'.repeat(10_000),
+      memories: ['M'.repeat(10_000)],
+      sessionDelta: 'D'.repeat(10_000),
+      currentGoal: 'G'.repeat(10_000),
+      trigger,
+    });
+
+    expect(context.byteLength).toBe(Buffer.byteLength(context.text, 'utf8'));
+    expect(context.byteLength).toBeLessThanOrEqual(180);
+    expect((context as unknown as { profile?: string }).profile).toBeUndefined();
+    expect((context as unknown as { memories?: string[] }).memories).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(context), 'utf8')).toBeLessThanOrEqual(context.byteLength + 64);
+    expect(JSON.stringify(context)).not.toContain('P'.repeat(100));
+  });
+
+  it('validates required input, malformed triggers, UTF-8 cuts, exact boundaries, and minimum budgets', () => {
+    expect(() => new ContextBuilder({ byteBudget: 100 }).build({ ...({ soul: '', mission: 'mission', trigger } as never) })).toThrow(ContextValidationError);
+    expect(() => new ContextBuilder({ byteBudget: 100 }).build({ ...({ soul: 'soul', mission: 'mission', trigger: { type: 'invalid' } } as never) })).toThrow(ContextValidationError);
+    expect(() => new ContextBuilder({ byteBudget: 1 }).build({ soul: 'soul', mission: 'mission', trigger })).toThrow(ContextBudgetError);
+
+    const wide = new ContextBuilder({ byteBudget: 10_000 }).build({ soul: '人格', mission: '使命', profile: '档案', trigger });
+    const exact = new ContextBuilder({ byteBudget: Buffer.byteLength(wide.text, 'utf8') }).build({ soul: '人格', mission: '使命', profile: '档案', trigger });
+    expect(Buffer.byteLength(exact.text, 'utf8')).toBe(Buffer.byteLength(wide.text, 'utf8'));
+
+    const cut = new ContextBuilder({ byteBudget: Buffer.byteLength(wide.text, 'utf8') - 1 }).build({ soul: '人格', mission: '使命', profile: '档案', trigger });
+    expect(Buffer.byteLength(cut.text, 'utf8')).toBeLessThanOrEqual(Buffer.byteLength(wide.text, 'utf8') - 1);
+    expect(cut.text).not.toContain('\uFFFD');
   });
 });

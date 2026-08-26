@@ -13,4 +13,9 @@ describe('capability gap routing', () => {
       type: 'PROPOSE_PLUGIN', name: 'calendar', capabilityGap: 'calendar access', design: 'Add calendar API.',
     });
   });
+
+  it('rejects instruction-expressible gaps without instructions even when design is present', () => {
+    expect(() => routeCapabilityGap({ name: 'focus', gap: 'focus timer', canUseExistingTools: true, design: 'not a skill' })).toThrow(/instructions/i);
+    expect(() => routeCapabilityGap({ name: 'focus', gap: 'focus timer', expressibleAsInstructions: true, design: 'not a skill' })).toThrow(/instructions/i);
+  });
 });

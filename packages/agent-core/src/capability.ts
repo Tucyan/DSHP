@@ -21,7 +21,10 @@ export function routeCapabilityGap(input: CapabilityGapInput): Extract<AgentActi
   const canCreateSkill = parsed.canUseExistingTools === true
     || parsed.expressibleAsInstructions === true
     || parsed.canExpressAsInstructions === true;
-  if (canCreateSkill && parsed.instructions) {
+  if (canCreateSkill && !parsed.instructions) {
+    throw new z.ZodError([{ code: 'custom', path: ['instructions'], message: 'Instructions are required for an instruction-expressible capability gap' }]);
+  }
+  if (canCreateSkill) {
     return AgentActionSchema.parse({
       type: 'CREATE_SKILL',
       name: parsed.name,
