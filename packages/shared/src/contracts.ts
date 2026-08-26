@@ -23,16 +23,17 @@ export const AgentActionSchema = z.discriminatedUnion('type', [
 
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 
-const isBackgroundTrigger = (trigger: unknown): boolean =>
-  typeof trigger === 'object' && trigger !== null && (trigger as { type?: unknown }).type === 'background_heartbeat';
+const isBackgroundTrigger = (trigger: AgentTrigger): boolean => trigger.type === 'background_heartbeat';
 
 const isUserVisibleAction = (action: AgentAction): boolean =>
   action.type === 'RESPOND' || action.type === 'MESSAGE_USER';
 
 /** Returns false for malformed actions and for user-visible background actions. */
 export function isActionAllowedForTrigger(trigger: unknown, action: unknown): action is AgentAction {
+  const parsedTrigger = AgentTriggerSchema.safeParse(trigger);
+  if (!parsedTrigger.success) return false;
   const parsed = AgentActionSchema.safeParse(action);
-  return parsed.success && !(isBackgroundTrigger(trigger) && isUserVisibleAction(parsed.data));
+  return parsed.success && !(isBackgroundTrigger(parsedTrigger.data) && isUserVisibleAction(parsed.data));
 }
 
 /** Validates and applies the trigger-aware action policy. */

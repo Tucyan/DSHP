@@ -29,6 +29,8 @@ describe('shared contracts', () => {
     for (const action of actions) expect(AgentActionSchema.safeParse(action).success).toBe(true);
     expect(AgentTriggerSchema.safeParse({ type: 'nope' }).success).toBe(false);
     expect(AgentActionSchema.safeParse({ type: 'MESSAGE_USER', text: 'x', importance: 'urgent' }).success).toBe(false);
+    expect(AgentActionSchema.safeParse({ type: 'RESPOND', text: '' }).success).toBe(false);
+    expect(AgentActionSchema.safeParse({ type: 'MESSAGE_USER', text: '', importance: 'normal' }).success).toBe(false);
   });
 
   it('rejects user-visible actions structurally for background heartbeats', () => {
@@ -37,6 +39,7 @@ describe('shared contracts', () => {
     const message = { type: 'MESSAGE_USER', text: 'not allowed', importance: 'high' } as const;
     expect(isActionAllowedForTrigger(trigger, response)).toBe(false);
     expect(isActionAllowedForTrigger(trigger, message)).toBe(false);
+    expect(isActionAllowedForTrigger({ type: 'background_heartbeat' }, response)).toBe(false);
     expect(() => assertActionAllowedForTrigger(trigger, response)).toThrow(/background/i);
     expect(assertActionAllowedForTrigger(trigger, { type: 'REFLECT', summary: 'ok' })).toEqual({ type: 'REFLECT', summary: 'ok' });
   });

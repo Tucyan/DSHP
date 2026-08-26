@@ -10,6 +10,12 @@ describe('trace records', () => {
         Token: 'abc',
         nested: { password: 'pw', APIKEY: 'key', keep: 'yes' },
         list: [{ appSecret: 'app', value: 1 }],
+        credentials: 'credentials',
+        private_key: 'private',
+        Authorization: 'authorization',
+        accessKey: 'access',
+        bearer: 'bearer',
+        authHeader: 'auth-header',
       },
     };
     expect(TraceRecordSchema.safeParse(record).success).toBe(true);
@@ -20,6 +26,12 @@ describe('trace records', () => {
         Token: '[REDACTED]',
         nested: { password: '[REDACTED]', APIKEY: '[REDACTED]', keep: 'yes' },
         list: [{ appSecret: '[REDACTED]', value: 1 }],
+        credentials: '[REDACTED]',
+        private_key: '[REDACTED]',
+        Authorization: '[REDACTED]',
+        accessKey: '[REDACTED]',
+        bearer: '[REDACTED]',
+        authHeader: '[REDACTED]',
       },
     });
   });
