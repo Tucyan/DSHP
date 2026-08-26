@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { QqDurableStateStore } from '../src/durable.js';
@@ -15,6 +15,12 @@ describe('QQ durable binding and outbound ledger', () => {
     const restored = await QqDurableStateStore.open(path.join(root, 'data', 'qq-state.json'), root);
     expect(restored.binding()).toEqual({ peerId: 'u-1', context: 'private' });
     await expect(QqDurableStateStore.open(path.join(root, '..', 'escape.json'), root)).rejects.toThrow(/runtime root/i);
+  });
+  it('does not touch the filesystem during construction', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-'));
+    const statePath = path.join(root, 'nested', 'state.json');
+    new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root);
+    await expect(access(statePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('dedupes sent messages after restart and fails closed on pending ambiguity', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-'));

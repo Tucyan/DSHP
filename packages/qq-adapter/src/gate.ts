@@ -1,8 +1,7 @@
 import type { AgentTrigger } from '@personal-growth/shared';
 import type { QqConfig } from './config.js';
-import { writeJsonAtomic } from '@personal-growth/shared';
-import path from 'node:path';
 import { AgentTriggerSchema } from '@personal-growth/shared';
+import { QqDurableStateStore } from './durable.js';
 
 export interface QqInbound { peerId: string; context: 'private' | 'group'; groupId?: string; messageId: string; text: string; at?: string; }
 export class SingleUserQqGate {
@@ -15,9 +14,9 @@ export class SingleUserQqGate {
   }
   binding(): { peerId: string; context: 'private' } { return { peerId: this.config.peerId, context: 'private' }; }
   /** Explicit opt-in persistence; construction and acceptance never touch the filesystem. */
-  async persistBinding(filePath = this.config.bindingPath): Promise<void> {
+  async persistBinding(runtimeRoot: string, filePath = this.config.bindingPath): Promise<void> {
     if (!filePath) throw new Error('bindingPath is required to persist QQ binding');
-    if (path.basename(filePath).toLowerCase() !== 'qq-binding.json' || filePath.split(/[\\/]/u).includes('..')) throw new Error('binding path must be a safe qq-binding.json path');
-    await writeJsonAtomic(filePath, this.binding());
+    const store = await QqDurableStateStore.open(filePath, runtimeRoot);
+    await store.bind(this.config.peerId);
   }
 }

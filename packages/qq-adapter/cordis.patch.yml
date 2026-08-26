@@ -6,7 +6,7 @@
         appId: __FROM_ENV__
         appSecret: __FROM_ENV__
         access:
-          c2cMode: allowlist
+          c2cMode: disabled
           c2cAllow: []
           groupMode: disabled
           groupAllow: []

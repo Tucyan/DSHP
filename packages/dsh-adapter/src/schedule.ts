@@ -19,7 +19,11 @@ export interface DshSchedulePort {
   delete(id: string): Promise<boolean>;
 }
 export class ScheduleAdapterError extends Error {
-  constructor(readonly code: 'INVALID_SCHEDULE' | 'IDEMPOTENCY_CONFLICT', message: string) { super(message); this.name = 'ScheduleAdapterError'; }
+  constructor(readonly code: 'INVALID_SCHEDULE' | 'IDEMPOTENCY_CONFLICT' | 'ADAPTER_FAILURE' | 'SESSION_OWNERSHIP' | 'UNSUPPORTED_OPERATION', message: string) { super(message); this.name = 'ScheduleAdapterError'; }
+}
+function normalizedScheduleError(operation: string, error: unknown): ScheduleAdapterError {
+  if (error instanceof ScheduleAdapterError) return error;
+  return new ScheduleAdapterError('ADAPTER_FAILURE', `${operation} failed`);
 }
 const StateSchema = z.array(z.object({ id: z.string(), sessionId: z.string(), prompt: z.string(), kind: z.enum(['once', 'interval']), at: z.string(), everySeconds: z.number().int().min(300).optional(), idempotencyKey: z.string(), status: z.enum(['scheduled', 'overdue']), createdAt: z.string() }));
 type State = z.infer<typeof StateSchema>;
@@ -64,7 +68,7 @@ export class DshSchedule implements DshSchedulePort {
     catch (error) { if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error; }
     return new DshSchedule(statePath, snapshot);
   }
-  recover(now: string): Promise<ScheduleBinding[]> { return this.mutate(async () => this.fake.due(now)); }
+  recover(now: string): Promise<ScheduleBinding[]> { return this.mutate(async () => this.fake.due(now)).catch((error: unknown) => { throw normalizedScheduleError('schedule recovery', error); }); }
   private async persist(): Promise<void> {
     if (!this.statePath) return;
     const data = JSON.stringify(this.fake.snapshot(), null, 2) + '\n';
@@ -73,9 +77,9 @@ export class DshSchedule implements DshSchedulePort {
     await fs.writeFile(temp, data, 'utf8'); await fs.rename(temp, this.statePath);
   }
   private mutate<T>(fn: () => Promise<T>): Promise<T> { const result = this.writeQueue.then(async () => { const value = await fn(); await this.persist(); return value; }); this.writeQueue = result.then(() => undefined, () => undefined); return result; }
-  create(request: ScheduleRequest, idempotencyKey?: string) { return this.mutate(() => this.fake.create(request, idempotencyKey)); }
-  list(sessionId?: string) { return this.fake.list(sessionId); }
-  delete(id: string) { return this.mutate(() => this.fake.delete(id)); }
+  create(request: ScheduleRequest, idempotencyKey?: string) { return this.mutate(() => this.fake.create(request, idempotencyKey)).catch((error: unknown) => { throw normalizedScheduleError('schedule create', error); }); }
+  list(sessionId?: string) { return this.fake.list(sessionId).catch((error: unknown) => { throw normalizedScheduleError('schedule list', error); }); }
+  delete(id: string) { return this.mutate(() => this.fake.delete(id)).catch((error: unknown) => { throw normalizedScheduleError('schedule delete', error); }); }
 }
 
 export interface DshLiveScheduleTool {
@@ -119,8 +123,34 @@ export class LiveDshSchedule implements DshSchedulePort {
       const result = await this.tool.create({ sessionId: parsed.data.sessionId, prompt: parsed.data.prompt, at: parsed.data.at, everySeconds: parsed.data.everySeconds });
       const binding: ScheduleBinding = { ...parsed.data, id: result.id, idempotencyKey: key, status: 'scheduled', createdAt: new Date().toISOString() };
       this.bindings.set(binding.id, binding); return { ...binding };
-    });
+    }).catch((error: unknown) => { throw normalizedScheduleError('live schedule create', error); });
   }
-  async list(sessionId = this.sessionId): Promise<ScheduleBinding[]> { if (this.tool.list) return (await this.tool.list(sessionId)).map((binding) => ({ ...binding })); return [...this.bindings.values()].filter((binding) => binding.sessionId === sessionId).map((binding) => ({ ...binding })); }
-  async delete(id: string): Promise<boolean> { return this.mutate(async () => { const result = await this.tool.delete(id); const existed = this.bindings.delete(id); return result === false ? false : existed || result === true; }); }
+  async list(sessionId = this.sessionId): Promise<ScheduleBinding[]> {
+    if (sessionId !== this.sessionId) return [];
+    try {
+      const result = this.tool.list ? await this.tool.list(sessionId) : [...this.bindings.values()];
+      const parsed = StateSchema.safeParse(result);
+      if (!parsed.success) throw new ScheduleAdapterError('ADAPTER_FAILURE', 'live schedule list returned invalid bindings');
+      if (parsed.data.some((binding) => binding.sessionId !== this.sessionId)) throw new ScheduleAdapterError('SESSION_OWNERSHIP', 'live schedule list returned a foreign session binding');
+      return parsed.data.map((binding) => ({ ...binding }));
+    } catch (error) { throw normalizedScheduleError('live schedule list', error); }
+  }
+  async recover(now: string): Promise<ScheduleBinding[]> {
+    try {
+      const overdue = [...this.bindings.values()].filter((binding) => binding.sessionId === this.sessionId && binding.kind === 'once' && binding.status === 'scheduled' && binding.at <= now).map((binding) => ({ ...binding, status: 'overdue' as const }));
+      for (const binding of overdue) this.bindings.set(binding.id, binding);
+      await this.persist();
+      return overdue;
+    } catch (error) { throw normalizedScheduleError('live schedule recovery', error); }
+  }
+  async delete(id: string): Promise<boolean> {
+    return this.mutate(async () => {
+      const binding = this.bindings.get(id);
+      if (!binding) return false;
+      if (binding.sessionId !== this.sessionId) throw new ScheduleAdapterError('SESSION_OWNERSHIP', 'schedule belongs to another session');
+      const result = await this.tool.delete(id);
+      if (result === false) return false;
+      this.bindings.delete(id); return true;
+    }).catch((error: unknown) => { throw normalizedScheduleError('live schedule delete', error); });
+  }
 }

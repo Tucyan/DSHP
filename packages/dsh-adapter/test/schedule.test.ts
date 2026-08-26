@@ -57,6 +57,22 @@ describe('DSH schedule adapter', () => {
     expect(await live.delete('live-1')).toBe(true);
     expect(calls).toEqual(['live-1']);
   });
+  it('filters foreign live bindings and refuses foreign deletes', async () => {
+    const tool = {
+      create: async () => ({ id: 'live-1' }),
+      list: async () => [{ ...req, id: 'foreign', idempotencyKey: 'foreign', status: 'scheduled' as const, createdAt: req.at, sessionId: 'other' }],
+      delete: async () => true,
+    };
+    const live = new LiveDshSchedule(tool, 'qq:123');
+    await expect(live.list()).rejects.toMatchObject({ code: 'SESSION_OWNERSHIP' });
+    await expect(live.delete('foreign')).resolves.toBe(false);
+  });
+  it('normalizes live tool failures without exposing the cause', async () => {
+    const live = new LiveDshSchedule({ create: async () => { throw new Error('secret token'); }, delete: async () => false }, 'qq:123');
+    const failure = await live.create(req).catch((error: unknown) => error as Error & { code: string });
+    expect(failure.code).toBe('ADAPTER_FAILURE');
+    expect(failure.message).not.toContain('secret');
+  });
   it('binds schedules to a session and has no filesystem side effect by default', async () => {
     const schedule = new FakeDshSchedule();
     await schedule.create(req);
