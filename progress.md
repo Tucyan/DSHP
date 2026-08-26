@@ -4,7 +4,7 @@
 
 ### Phase 1: Requirements, DSH Baseline, and Architecture
 
-- **Status:** in_progress
+- **Status:** complete
 - **Started:** 2026-08-26
 - Actions taken:
   - Read the complete user specification and attached implementation recommendation.
@@ -16,11 +16,25 @@
   - Queried the npm registry and upstream refs once; pinned DSH `0.1.1-rc.2` and recorded upstream commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
   - Confirmed official Profile/bundle loading, isolation variables, and session-local Schedule behavior.
   - Selected Tencent `@tencent-connect/dsh-qqbot@0.4.0` as the real QQ integration and retained a local fake for credential-free tests.
+  - Received and assessed the read-only subagent report covering DSH versioning, isolation roots, plugin APIs, persistence semantics, Schedule limits, and QQ integration.
+  - Wrote and self-reviewed the DSH baseline, architecture, master plan, and five subsystem execution plans; placeholder scan returned no forbidden plan placeholders.
 - Files created/modified:
   - `.gitignore` (created)
   - `task_plan.md` (created)
   - `findings.md` (created)
   - `progress.md` (created)
+  - `docs/DSH_BASELINE.md` (created)
+  - `docs/ARCHITECTURE.md` (created)
+  - `docs/plans/*.md` (created)
+
+### Phase 2: Repository and Isolated Runtime Foundation
+
+- **Status:** in_progress
+- Actions taken:
+  - Initialized Git and switched immediately to `feature/personal-agent-v0.1`.
+  - Committed the initial planning baseline.
+- Files created/modified:
+  - Git repository metadata and feature branch
 
 ## Test Results
 
@@ -28,6 +42,7 @@
 |------|-------|----------|--------|--------|
 | Workspace inspection | Git and file listing | Identify existing baseline | Empty, non-Git workspace | pass |
 | Toolchain inspection | Version commands | Detect local tools | Node/pnpm/npm/Corepack/Git available | pass |
+| Plan placeholder scan | `rg` forbidden plan phrases | No placeholders | No forbidden placeholders found | pass |
 
 ## Error Log
 
@@ -40,7 +55,7 @@
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1: verifying DSH and planning the architecture |
+| Where am I? | Phase 2: building the repository and isolated runtime foundation |
 | Where am I going? | Foundation, plugins, adapters, end-to-end verification, handoff |
 | What's the goal? | A verified Personal Growth Agent v0.1 on an isolated DSH instance |
 | What have I learned? | See `findings.md` |

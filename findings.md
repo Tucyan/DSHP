@@ -28,6 +28,11 @@
 - Tencent's QQ plugin supports QR binding or `QQBOT_APPID`/`QQBOT_SECRET`, direct/group prompts, agent preset selection, and assistant-output forwarding to QQ.
 - The QQ plugin peer-depends on DSH agent/session/LLM packages `>=0.1.0-rc.6`, so it is compatible in principle with pinned DSH `0.1.1-rc.2`; live compatibility still needs a smoke test.
 - For the single-user requirement, the project must add an explicit fixed-user gate around inbound handling/configuration because the upstream plugin supports multiple peers by default.
+- Reconnaissance subagent confirmed DSH `0.1.1-rc.2` requires Node `^22.19.0 || >=24.0.0` and the upstream repository declares pnpm `11.7.0`; the local Node 24 satisfies the runtime requirement.
+- DSH Session is an append-only event source with JSONL/SQLite persistence and interrupted-turn recovery; durable Goal mutations are Session events using revision compare-and-set.
+- DSH Schedule only fires while its owning Session is live; cold-session reminders become overdue after resume, and delivery is best-effort at-least-once.
+- `DSH_AGENTS_HOME` is primarily a shared skill-discovery root, not a second Session/Goal persistence root.
+- Official plugin guidance supports TypeScript modules exporting `apply(ctx)` and class-form Cordis `Service` providers; external bundles use a `cordis.patch.yml` layer.
 
 ## Technical Decisions
 
@@ -41,6 +46,8 @@
 | Pin `@deepseek-ai/dsh` to `0.1.1-rc.2` and record upstream commit separately | Avoids following a moving prerelease while preserving the source baseline used for API review |
 | Separate session reminders from deployment heartbeat scheduling | Official DSH Schedule is session-local; background autonomy needs a durable deployment-level wake mechanism |
 | Integrate Tencent `@tencent-connect/dsh-qqbot@0.4.0` instead of developing a QQ protocol stack | It is purpose-built for DSH, uses deterministic persistent sessions, and supports QR credential binding |
+| Keep heartbeat delivery idempotent and record occurrence keys | DSH Schedule is at-least-once around crash windows and background scheduling is outside cold Sessions |
+| Use DSH Session as the conversation source while retaining domain-owned semantic memory files | Avoids duplicating raw chat persistence while preserving the requested Memory Tree semantics |
 
 ## Issues Encountered
 
@@ -57,6 +64,10 @@
 - DSH schedule docs: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/schedule/schedule/README.md
 - DSH skill filesystem docs: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/skill/skill-filesystem/README.md
 - Tencent QQ plugin: https://github.com/tencent-connect/dsh-qqbot
+- DSH Session subsystem: https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/session
+- DSH persistence subsystem: https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/persistence
+- DSH Goal subsystem: https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/goal
+- DSH plugin tutorial: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/index.md
 
 ## Visual/Browser Findings
 

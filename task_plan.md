@@ -6,7 +6,7 @@ Build and verify a single-user Personal Growth Agent v0.1 on an isolated DSH ins
 
 ## Current Phase
 
-Phase 1
+Phase 2
 
 ## Phases
 
@@ -14,10 +14,10 @@ Phase 1
 
 - [x] Capture user requirements and attached implementation guidance
 - [x] Inspect the workspace and local toolchain
-- [ ] Verify current DSH APIs and QQ integration options from primary sources
-- [ ] Lock the DSH version/commit and document the baseline
-- [ ] Produce executable subsystem plans and shared contracts
-- **Status:** in_progress
+- [x] Verify current DSH APIs and QQ integration options from primary sources
+- [x] Lock the DSH version/commit and document the baseline
+- [x] Produce executable subsystem plans and shared contracts
+- **Status:** complete
 
 ### Phase 2: Repository and Isolated Runtime Foundation
 
@@ -25,7 +25,7 @@ Phase 1
 - [ ] Add isolated DSH launcher/configuration without modifying `~/.dsh` or `~/.agents`
 - [ ] Add shared contracts, configuration, test harness, and trace schema
 - [ ] Verify the isolated baseline
-- **Status:** pending
+- **Status:** in_progress
 
 ### Phase 3: Core, Memory, and Heartbeat Plugins
 
@@ -91,4 +91,3 @@ Phase 1
 - Do not modify the user's existing `~/.dsh` or `~/.agents` directories.
 - External credentials are never committed; live QQ/DSH verification is conditional on credentials.
 - NOOP is a first-class foreground heartbeat result; background heartbeat must never directly message the user.
-
