@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { MEMORY_CATEGORIES, type MemoryCategory, pathForMemory, workspacePaths, type WorkspacePaths } from './paths.js';
+import { MEMORY_CATEGORIES, type MemoryCategory, pathForMemory, validateWorkspacePaths, workspacePaths, type WorkspacePaths } from './paths.js';
 
 export const MemoryMetadataSchema = z.object({
   category: z.enum(MEMORY_CATEGORIES),
@@ -36,7 +36,7 @@ async function hashText(value: string): Promise<string> {
 
 export class MemoryReader {
   readonly paths: WorkspacePaths;
-  constructor(workspaceOrPaths: string | WorkspacePaths = process.cwd()) { this.paths = typeof workspaceOrPaths === 'string' ? workspacePaths(workspaceOrPaths) : workspaceOrPaths; }
+  constructor(workspaceOrPaths: string | WorkspacePaths = process.cwd()) { this.paths = validateWorkspacePaths(typeof workspaceOrPaths === 'string' ? workspacePaths(workspaceOrPaths) : workspaceOrPaths); }
 
   async list(category?: MemoryCategory): Promise<MemoryDocument[]> {
     const categories = category ? [category] : [...MEMORY_CATEGORIES];
@@ -92,6 +92,10 @@ export async function assertWorkspacePath(paths: WorkspacePaths, target: string)
       throw error;
     }
   }
+}
+
+export async function assertOperationalPaths(paths: WorkspacePaths): Promise<void> {
+  for (const target of [paths.profile, paths.memory, paths.index, paths.history, paths.state, paths.revisions, `${paths.memory}/.writer.lock`]) await assertWorkspacePath(paths, target);
 }
 
 async function markdownFiles(root: string): Promise<string[]> {

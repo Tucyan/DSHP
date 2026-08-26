@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-export async function withWorkspaceLock<T>(workspace: string, operation: () => Promise<T>, timeoutMs = 2_000): Promise<T> {
+export async function withWorkspaceLock<T>(workspace: string, operation: () => Promise<T>, timeoutMs = 30_000): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error('Workspace lock timeout must be a positive finite number');
   const lockPath = join(workspace, 'memory', '.writer.lock');
   try { if ((await lstat(dirname(lockPath))).isSymbolicLink()) throw new Error(`Symlinked workspace memory root is not allowed: ${dirname(lockPath)}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await mkdir(dirname(lockPath), { recursive: true });

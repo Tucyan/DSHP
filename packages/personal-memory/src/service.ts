@@ -1,28 +1,43 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { appendJsonl, readJson, readJsonl, writeJsonAtomic } from '@personal-growth/shared';
 import { renderIndex } from './index-builder.js';
 import { renderProfile } from './profile-builder.js';
-import { SafeMemoryPathSchema, pathForMemory, workspacePaths, type WorkspacePaths } from './paths.js';
+import { SafeMemoryPathSchema, pathForMemory, validateWorkspacePaths, workspacePaths, type WorkspacePaths } from './paths.js';
 import { ProposalSchema, type MemoryProposal } from './proposal.js';
-import { assertWorkspacePath, MemoryReader, MemoryMetadataSchema, renderMemoryDocument } from './reader.js';
+import { assertOperationalPaths, assertWorkspacePath, MemoryReader, MemoryMetadataSchema, renderMemoryDocument } from './reader.js';
 import { RevisionSchema, type RevisionRecord } from './revision.js';
-import { CursorConsolidator, type CompressorPort, type ConversationEvent, type HistoryRecord } from './consolidator.js';
+import { CursorConsolidator, MAX_CONVERSATION_SEQ, type CompressorPort, type ConversationEvent, type HistoryRecord } from './consolidator.js';
 import { withWorkspaceLock } from './lock.js';
 
-export interface MemoryServiceOptions { workspace?: string; workspaceRoot?: string; workspaceDir?: string; paths?: WorkspacePaths; actor?: string; clock?: () => string; compressor?: CompressorPort; }
+export interface MemoryServiceOptions { workspace?: string; workspaceRoot?: string; workspaceDir?: string; paths?: WorkspacePaths; actor?: string; clock?: () => string; compressor?: CompressorPort; lockTimeoutMs?: number; }
 export interface MutationResult { accepted: boolean; action: MemoryProposal['action']; path?: string; revision?: RevisionRecord; trace: { result: string; reason?: string }; }
-const DocumentPendingCommon = { path: SafeMemoryPathSchema, beforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), revision: RevisionSchema };
-const PendingCommon = { path: SafeMemoryPathSchema, targetPath: SafeMemoryPathSchema, source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema };
-const PendingSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('CREATE'), ...DocumentPendingCommon }).strict(),
-  z.object({ action: z.literal('UPDATE'), ...DocumentPendingCommon }).strict(),
-  z.object({ action: z.literal('MERGE'), ...PendingCommon, writePath: SafeMemoryPathSchema, targetBeforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]) }).strict(),
+const ActivePathSchema = SafeMemoryPathSchema.superRefine((value, ctx) => { if (value.toLowerCase().startsWith('archive/')) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending active path cannot be archived' }); });
+const ArchivePathSchema = SafeMemoryPathSchema.superRefine((value, ctx) => { if (!value.toLowerCase().startsWith('archive/')) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending archive path required' }); });
+const HashSchema = z.string().regex(/^[a-f0-9]{64}$/i);
+const DocumentPendingCommon = { path: ActivePathSchema, source: z.array(z.string().min(1)).min(1), afterHash: HashSchema, afterRaw: z.string().min(1), revision: RevisionSchema };
+const PendingCommon = { path: ActivePathSchema, targetPath: ArchivePathSchema, source: z.array(z.string().min(1)).min(1), beforeHash: HashSchema, archiveHash: HashSchema, afterHash: HashSchema, afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema };
+const PendingSchema = z.union([
+  z.object({ action: z.literal('CREATE'), ...DocumentPendingCommon, beforeHash: z.null() }).strict(),
+  z.object({ action: z.literal('UPDATE'), ...DocumentPendingCommon, beforeHash: HashSchema }).strict(),
+  z.object({ action: z.literal('MERGE'), ...PendingCommon, writePath: ActivePathSchema, targetBeforeHash: HashSchema }).strict(),
   z.object({ action: z.literal('ARCHIVE'), ...PendingCommon, targetBeforeHash: z.null() }).strict(),
-]);
-const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}), pendingMutation: PendingSchema.optional() }).strict();
+]).superRefine((pending, ctx) => {
+  if (pending.revision.action !== pending.action) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending journal revision action mismatch' });
+  const revisionPath = pending.action === 'MERGE' ? pending.writePath : pending.path;
+  if (pending.revision.path !== revisionPath) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending journal revision path mismatch' });
+  if (pending.afterHash !== hash(pending.afterRaw)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending afterHash does not match afterRaw' });
+  if ((pending.action === 'CREATE' || pending.action === 'UPDATE') && JSON.stringify(pending.revision.source) !== JSON.stringify(pending.source)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Document pending revision source mismatch' });
+  if ((pending.action === 'MERGE' || pending.action === 'ARCHIVE') && pending.archiveHash !== hash(pending.archiveRaw)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pending archiveHash does not match archiveRaw' });
+  if (pending.action === 'CREATE' && (pending.revision.beforeHash !== null || pending.revision.afterHash !== pending.afterHash)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'CREATE revision hash mismatch' });
+  if (pending.action === 'UPDATE' && (pending.revision.beforeHash !== pending.beforeHash || pending.revision.afterHash !== pending.afterHash)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'UPDATE revision hash mismatch' });
+  if (pending.action === 'ARCHIVE' && (pending.revision.beforeHash !== pending.beforeHash || pending.revision.afterHash !== pending.archiveHash)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'ARCHIVE revision hash mismatch' });
+  if (pending.action === 'ARCHIVE' && JSON.stringify(pending.revision.source) !== JSON.stringify(pending.source)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'ARCHIVE revision source mismatch' });
+  if (pending.action === 'MERGE' && (pending.revision.beforeHash !== pending.targetBeforeHash || pending.revision.afterHash !== pending.afterHash || JSON.stringify(pending.revision.source) !== JSON.stringify(pending.source))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'MERGE revision relationship mismatch' });
+});
+const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative().max(MAX_CONVERSATION_SEQ)).default({}), pendingMutation: PendingSchema.optional() }).strict();
 type State = z.infer<typeof StateSchema>;
 
 export class MemoryService {
@@ -30,43 +45,55 @@ export class MemoryService {
   readonly reader: MemoryReader;
   private readonly actor: string;
   private readonly clock: () => string;
+  private readonly lockTimeoutMs: number;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly ready: Promise<void>;
   private readonly consolidator?: CursorConsolidator;
 
   constructor(options: MemoryServiceOptions = {}) {
-    this.paths = options.paths ?? workspacePaths(options.workspaceRoot ?? options.workspaceDir ?? options.workspace ?? process.cwd());
+    this.paths = validateWorkspacePaths(options.paths ?? workspacePaths(options.workspaceRoot ?? options.workspaceDir ?? options.workspace ?? process.cwd()));
     this.reader = new MemoryReader(this.paths);
     this.actor = options.actor ?? 'personal-memory';
     this.clock = options.clock ?? (() => new Date().toISOString());
-    if (options.compressor) this.consolidator = new CursorConsolidator({ paths: this.paths, compressor: options.compressor, clock: this.clock, manageLock: false });
-    this.ready = withWorkspaceLock(this.paths.root, () => this.recoverPending());
+    this.lockTimeoutMs = options.lockTimeoutMs ?? 30_000;
+    if (this.lockTimeoutMs < 30_000 || !Number.isFinite(this.lockTimeoutMs)) throw new Error('Configured workspace lock timeout must be at least 30000ms');
+    if (options.compressor) this.consolidator = new CursorConsolidator({ paths: this.paths, compressor: options.compressor, clock: this.clock, lockTimeoutMs: this.lockTimeoutMs });
+    const startup = withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); }, this.lockTimeoutMs);
+    startup.catch(() => undefined);
+    this.ready = startup;
   }
 
-  list(category?: Parameters<MemoryReader['list']>[0]) { return this.ready.then(() => this.reader.list(category)); }
-  read(path: string) { return this.ready.then(() => this.reader.read(path)); }
-  search(query: string, limit?: number) { return this.ready.then(() => this.reader.search(query, limit)); }
-  async readProfile(): Promise<string> { await this.ready; try { return await readFile(this.paths.profile, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
-  async readIndex(): Promise<string> { await this.ready; try { return await readFile(this.paths.index, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
+  list(category?: Parameters<MemoryReader['list']>[0]) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.list(category); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  read(path: string) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.read(path); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  search(query: string, limit?: number) { return this.ready.then(() => withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); return this.reader.search(query, limit); }, this.lockTimeoutMs), (error) => Promise.reject(error)); }
+  async readProfile(): Promise<string> { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.profile, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
+  async readIndex(): Promise<string> { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); try { return await readFile(this.paths.index, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }, this.lockTimeoutMs); }
   consume(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
     if (!this.consolidator) return Promise.reject(new Error('No compressor is configured'));
-    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, () => this.consolidator!.consume(events)); });
+    const operation = this.queue.then(async () => { await this.ready; await assertOperationalPaths(this.paths); return this.consolidator!.consume(events); });
     this.queue = operation.catch(() => undefined); return operation;
   }
   consolidate(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> { return this.consume(events); }
 
   apply(proposal: MemoryProposal): Promise<MutationResult> {
     const parsed = ProposalSchema.parse(proposal);
-    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await this.recoverPending(); return this.applyNow(parsed); }); });
+    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); return this.applyNow(parsed); }, this.lockTimeoutMs); });
     this.queue = operation.catch(() => undefined);
     return operation;
   }
   applyProposal(proposal: MemoryProposal): Promise<MutationResult> { return this.apply(proposal); }
 
   async rememberExplicit(input: ExplicitMemoryInput | string): Promise<MutationResult> {
-    await this.ready;
-    const proposal = await this.explicitProposal(input);
-    return this.apply(proposal);
+    const operation = this.queue.then(async () => {
+      await this.ready;
+      return withWorkspaceLock(this.paths.root, async () => {
+        await assertOperationalPaths(this.paths);
+        await this.recoverPending();
+        return this.applyNow(await this.explicitProposal(input));
+      }, this.lockTimeoutMs);
+    });
+    this.queue = operation.catch(() => undefined);
+    return operation;
   }
 
   private async explicitProposal(input: ExplicitMemoryInput | string): Promise<MemoryProposal> {
@@ -81,13 +108,15 @@ export class MemoryService {
   }
 
   private async applyNow(proposal: MemoryProposal): Promise<MutationResult> {
+    const revisionLedger = await readJsonl(this.paths.revisions, RevisionSchema);
+    if (revisionLedger.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisionLedger.errors.map((error) => error.line).join(',')}`);
     if (proposal.action === 'IGNORE') return { accepted: true, action: 'IGNORE', path: proposal.path, trace: { result: 'ignored', reason: proposal.reason } };
     const source = proposal.sourceEvidence;
     if (proposal.action === 'CREATE') {
       if (await this.exists(proposal.path)) throw new Error(`Memory already exists: ${proposal.path}`);
       const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, source, proposal.importance, proposal.frequency);
       const revision = this.makeRevision('CREATE', proposal.path, source, undefined, raw);
-      await this.persistPending({ action: 'CREATE', path: proposal.path, beforeHash: null, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
+      await this.persistPending({ action: 'CREATE', path: proposal.path, source, beforeHash: null, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
       return { accepted: true, action: 'CREATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
     const current = await this.reader.read(proposal.path);
@@ -96,7 +125,7 @@ export class MemoryService {
       const mergedSources = [...new Set([...current.metadata.sources, ...source])];
       const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, mergedSources, proposal.importance ?? current.metadata.importance, proposal.frequency ?? current.metadata.frequency, current.metadata.createdAt);
       const revision = this.makeRevision('UPDATE', proposal.path, source, current.raw, raw);
-      await this.persistPending({ action: 'UPDATE', path: proposal.path, beforeHash: current.hash, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
+      await this.persistPending({ action: 'UPDATE', path: proposal.path, source, beforeHash: current.hash, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
       return { accepted: true, action: 'UPDATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
     if (proposal.action === 'MERGE') {
@@ -124,30 +153,13 @@ export class MemoryService {
     const metadata = MemoryMetadataSchema.parse({ category: path.split('/')[0], summary, importance, frequency, sources, createdAt: createdAt ?? this.clock(), updatedAt: this.clock() });
     return renderMemoryDocument(metadata, content);
   }
-  private async writeNew(path: string, summary: string, content: string, sources: string[], importance = 'normal', frequency = 'normal', createdAt?: string): Promise<string> {
-    const raw = this.buildRaw(path, summary, content, sources, importance, frequency, createdAt);
-    const target = pathForMemory(this.paths, path);
-    await assertWorkspacePath(this.paths, target);
-    await mkdir(dirname(target), { recursive: true });
-    const temporary = `${target}.${randomUUID()}.tmp`;
-    try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; }
-    return raw;
-  }
-  private async commitRevision(action: 'CREATE' | 'UPDATE' | 'MERGE' | 'ARCHIVE', path: string, source: string[], beforeRaw: string | undefined, afterRaw: string): Promise<MutationResult> {
-    const revision = this.makeRevision(action, path, source, beforeRaw, afterRaw);
-    const existing = await readJsonl(this.paths.revisions, RevisionSchema);
-    if (existing.errors.length) throw new Error(`Malformed revisions.jsonl: ${existing.errors.map((error) => error.line).join(',')}`);
-    await appendJsonl(this.paths.revisions, revision);
-    await this.rebuildProjections();
-    return { accepted: true, action, path, revision, trace: { result: 'applied' } };
-  }
   private makeRevision(action: 'CREATE' | 'UPDATE' | 'MERGE' | 'ARCHIVE', path: string, source: string[], beforeRaw: string | undefined, afterRaw: string): RevisionRecord {
-    const beforeHash = beforeRaw ? hash(beforeRaw) : undefined;
+    const beforeHash = beforeRaw ? hash(beforeRaw) : null;
     const afterHash = hash(afterRaw);
     return RevisionSchema.parse({ revisionId: `${action.toLocaleLowerCase()}-${path}-${afterHash.slice(0, 16)}`, time: this.clock(), actor: this.actor, action, path, source, beforeHash, afterHash });
   }
-  private async readState(): Promise<State> { try { return StateSchema.parse(await readJson(this.paths.state, StateSchema)); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { memoryCursor: {} }; throw error; } }
-  private async persistPending(pending: z.infer<typeof PendingSchema>): Promise<void> { const state = await this.readState(); state.pendingMutation = pending; await writeJsonAtomic(this.paths.state, state); }
+  private async readState(): Promise<State> { await assertOperationalPaths(this.paths); try { return StateSchema.parse(await readJson(this.paths.state, StateSchema)); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { memoryCursor: {} }; throw error; } }
+  private async persistPending(pending: z.infer<typeof PendingSchema>): Promise<void> { const state = await this.readState(); state.pendingMutation = pending; await assertWorkspacePath(this.paths, this.paths.state); await writeJsonAtomic(this.paths.state, state); }
   private async recoverPending(): Promise<void> { const state = await this.readState(); if (!state.pendingMutation) return; await this.completePending(); }
   private async completePending(): Promise<void> {
     const state = await this.readState(); const pending = state.pendingMutation; if (!pending) return;
@@ -165,8 +177,8 @@ export class MemoryService {
         }
       }
       const revisions = await readJsonl(this.paths.revisions, RevisionSchema); if (revisions.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisions.errors.map((error) => error.line).join(',')}`);
-      if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) await appendJsonl(this.paths.revisions, pending.revision);
-      await this.rebuildProjections(); delete state.pendingMutation; await writeJsonAtomic(this.paths.state, state); return;
+      if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) { await assertWorkspacePath(this.paths, this.paths.revisions); await appendJsonl(this.paths.revisions, pending.revision); }
+      await this.rebuildProjections(); delete state.pendingMutation; await assertWorkspacePath(this.paths, this.paths.state); await writeJsonAtomic(this.paths.state, state); return;
     }
     const sourcePath = pathForMemory(this.paths, pending.path); const targetPath = pathForMemory(this.paths, pending.targetPath); const writePath = pending.action === 'MERGE' ? pending.writePath : pending.targetPath;
     await assertWorkspacePath(this.paths, sourcePath); await assertWorkspacePath(this.paths, targetPath); await assertWorkspacePath(this.paths, pathForMemory(this.paths, writePath));
@@ -193,14 +205,14 @@ export class MemoryService {
     if ((await this.rawHashAt(targetPath)) !== pending.archiveHash) await this.writeRaw(pending.targetPath, pending.archiveRaw);
     const revisions = await readJsonl(this.paths.revisions, RevisionSchema);
     if (revisions.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisions.errors.map((error) => error.line).join(',')}`);
-    if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) await appendJsonl(this.paths.revisions, pending.revision);
+    if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) { await assertWorkspacePath(this.paths, this.paths.revisions); await appendJsonl(this.paths.revisions, pending.revision); }
     await this.rebuildProjections();
-    delete state.pendingMutation; await writeJsonAtomic(this.paths.state, state);
+    delete state.pendingMutation; await assertWorkspacePath(this.paths, this.paths.state); await writeJsonAtomic(this.paths.state, state);
   }
   private async writeRaw(path: string, raw: string): Promise<void> { const target = pathForMemory(this.paths, path); await assertWorkspacePath(this.paths, target); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${randomUUID()}.tmp`; try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
-  private async fileExists(path: string): Promise<boolean> { try { await readFile(pathForMemory(this.paths, path)); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
-  private async rawHashAt(path: string): Promise<string> { return hash(await readFile(path)); }
-  private async rebuildProjections(): Promise<void> { const documents = await this.reader.list(); await this.writeProjection(this.paths.index, renderIndex(documents)); await this.writeProjection(this.paths.profile, renderProfile(documents)); }
+  private async fileExists(path: string): Promise<boolean> { const target = pathForMemory(this.paths, path); await assertWorkspacePath(this.paths, target); try { await readFile(target); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
+  private async rawHashAt(path: string): Promise<string> { const target = isAbsolute(path) ? path : pathForMemory(this.paths, path); await assertWorkspacePath(this.paths, target); return hash(await readFile(target)); }
+  private async rebuildProjections(): Promise<void> { await assertOperationalPaths(this.paths); const documents = await this.reader.list(); await this.writeProjection(this.paths.index, renderIndex(documents)); await this.writeProjection(this.paths.profile, renderProfile(documents)); }
   private archiveRaw(document: Awaited<ReturnType<MemoryReader['read']>>, additionalSources: readonly string[] = []): string { return renderMemoryDocument(MemoryMetadataSchema.parse({ ...document.metadata, category: 'archive', sources: [...new Set([...document.metadata.sources, ...additionalSources])] }), document.content); }
   private async writeProjection(path: string, value: string): Promise<void> { await assertWorkspacePath(this.paths, path); await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${randomUUID()}.tmp`; try { await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
 }
