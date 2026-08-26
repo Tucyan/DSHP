@@ -37,6 +37,10 @@
   - Spec review found missing real linting; implementer added ESLint and spec re-review passed.
   - Quality review found persistence/error/redaction/version issues; implementer added regression tests and fixes, and quality re-review found no Critical or Important issues.
   - Independently ran the complete verification command after reviews.
+  - Implemented Agent Core with bounded context construction, centralized trigger/action policy, injected side-effect ports, safe tracing, capability routing, and Cordis bundle packaging.
+  - Spec review corrected context section ordering, package-local test discovery, and whitespace.
+  - Quality review drove trigger-first validation, raw-context removal, typed budget/input failures, centralized policy semantics, trace data minimization, no-config bundle loading, and contradictory capability rejection.
+  - Independently verified the reviewed Agent Core state.
 - Files created/modified:
   - Git repository metadata and feature branch
   - Root pnpm/TypeScript/Vitest/ESLint configuration
@@ -50,6 +54,7 @@
 | Toolchain inspection | Version commands | Detect local tools | Node/pnpm/npm/Corepack/Git available | pass |
 | Plan placeholder scan | `rg` forbidden plan phrases | No placeholders | No forbidden placeholders found | pass |
 | Shared verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass | 4 files, 11 tests; all gates passed | pass |
+| Agent Core verification | `corepack pnpm@11.7.0 verify` | lint/typecheck/test/build pass | 9 files, 32 tests; all gates passed | pass |
 
 ## Error Log
 
