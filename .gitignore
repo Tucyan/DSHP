@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+.pnpm-store/
+.env
+.env.*
+!.env.example
+runtime/dsh-home/
+runtime/agents-home/
+runtime/credentials/
+workspace/data/
+workspace/memory/
+workspace/sessions/
+*.log
+
