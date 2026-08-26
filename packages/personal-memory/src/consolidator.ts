@@ -9,16 +9,23 @@ export type HistoryRecord = z.infer<typeof HistoryRecordSchema>;
 const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}) }).passthrough();
 type State = z.infer<typeof StateSchema>;
 
-export interface CompressorPort { compress(events: readonly ConversationEvent[]): string | Promise<string> | { summary: string; sourceRefs?: string[] } | Promise<{ summary: string; sourceRefs?: string[] }>; }
+export interface CompressorPort { compress(events: readonly ConversationEvent[]): string | Promise<string>; }
 export interface ConsolidatorOptions { workspace?: string; root?: string; paths?: WorkspacePaths; compressor: CompressorPort; clock?: () => string; }
 
 export class CursorConsolidator {
   readonly paths: WorkspacePaths;
   private readonly compressor: CompressorPort;
   private readonly clock: () => string;
+  private queue: Promise<unknown> = Promise.resolve();
   constructor(options: ConsolidatorOptions) { this.paths = options.paths ?? workspacePaths(options.root ?? options.workspace ?? process.cwd()); this.compressor = options.compressor; this.clock = options.clock ?? (() => new Date().toISOString()); }
 
-  async consume(input: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
+  consume(input: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
+    const operation = this.queue.then(() => this.consumeNow(input));
+    this.queue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async consumeNow(input: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
     const parsed = input.map((event) => ConversationEventSchema.parse(event));
     const grouped = new Map<string, ConversationEvent[]>();
     for (const event of parsed) grouped.set(event.sessionId, [...(grouped.get(event.sessionId) ?? []), event]);
@@ -35,9 +42,9 @@ export class CursorConsolidator {
       const existing = (await readJsonl(this.paths.history, HistoryRecordSchema)).records.find((record) => record.id === id);
       if (existing) { state.memoryCursor[sessionId] = Math.max(state.memoryCursor[sessionId] ?? 0, toSeq); await this.writeState(state); latest = existing; continue; }
       const compressed = await this.compressor.compress(unseen);
-      const summary = typeof compressed === 'string' ? compressed : compressed.summary;
+      const summary = typeof compressed === 'string' ? compressed : (compressed as unknown as { summary?: string })?.summary;
       if (!summary?.trim()) throw new Error('Compressor returned an empty summary');
-      const sourceRefs = typeof compressed === 'string' ? unseen.map((event) => `${event.sessionId}:${event.seq}`) : compressed.sourceRefs ?? unseen.map((event) => `${event.sessionId}:${event.seq}`);
+      const sourceRefs = unseen.map((event) => `${event.sessionId}:${event.seq}`);
       const record = HistoryRecordSchema.parse({ id, sessionId, fromSeq, toSeq, sourceRefs, summary: summary.trim(), at: this.clock() });
       await appendJsonl(this.paths.history, record);
       state.memoryCursor[sessionId] = toSeq;

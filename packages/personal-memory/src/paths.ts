@@ -26,7 +26,9 @@ export function assertMemoryPath(value: string): string {
   const normalized = normalize(value).replaceAll('\\', '/');
   if (normalized !== value || normalized.startsWith('../') || normalized === '..' || normalized.includes('/../') || normalized.startsWith('/')) throw new Error('Memory path traversal is not allowed');
   const parts = normalized.split('/');
-  if (parts.length < 2 || !(MEMORY_CATEGORIES as readonly string[]).includes(parts[0]) || !parts.at(-1)!.toLowerCase().endsWith('.md') || parts.at(-1) === 'INDEX.md') throw new Error('Only category Markdown memory paths are allowed');
+  const basename = parts.at(-1)!.toLocaleLowerCase();
+  const reserved = new Set(['profile.md', 'index.md', 'history.jsonl', 'state.json', 'revisions.jsonl']);
+  if (parts.length < 2 || !(MEMORY_CATEGORIES as readonly string[]).includes(parts[0]) || !basename.endsWith('.md') || reserved.has(basename)) throw new Error('Only category Markdown memory paths are allowed');
   return normalized;
 }
 

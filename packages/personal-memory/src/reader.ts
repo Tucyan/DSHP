@@ -57,11 +57,11 @@ export class MemoryReader {
     const path = pathForMemory(this.paths, memoryPath);
     const raw = await readFile(path, 'utf8');
     const parsed = parseMemoryDocument(raw);
-    if (parsed.metadata.category !== memoryPath.split('/')[0]) throw new Error('Memory metadata category mismatch');
     return { path: memoryPath, ...parsed, raw, hash: await hashText(raw) };
   }
 
   async search(query: string, limit = 20): Promise<MemoryDocument[]> {
+    if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Search limit must be a positive integer no greater than 100');
     if (!query.trim()) return [];
     const needle = query.toLocaleLowerCase();
     const documents = await this.list();

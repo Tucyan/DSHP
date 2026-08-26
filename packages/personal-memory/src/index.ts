@@ -5,7 +5,6 @@ export * from './dream.js';
 export * from './proposal.js';
 export * from './revision.js';
 export * from './service.js';
-export * from './profile-builder.js';
-export * from './index-builder.js';
+export { renderProfile } from './profile-builder.js';
+export { renderIndex } from './index-builder.js';
 export * from './plugin.js';
-

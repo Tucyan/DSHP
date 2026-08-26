@@ -1,0 +1,37 @@
+import { readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { writeJsonAtomic } from '@personal-growth/shared';
+import { CursorConsolidator, DreamService, MemoryService, ProposalSchema, RevisionSchema } from '../src/index.js';
+
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+async function root() { const value = await mkdtemp(join(tmpdir(), 'personal-memory-expanded-')); roots.push(value); return value; }
+const e = (seq: number) => ({ sessionId: 's', seq, role: 'user' as const, content: `c${seq}`, at: '2026-01-01T00:00:00Z' });
+
+describe('expanded acceptance cases', () => {
+  it('stable preference -> CREATE', async () => { const service = new MemoryService({ workspace: await root() }); const result = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/stable.md', summary: 'Stable', content: 'yes', sourceEvidence: ['h'] })); expect(result.revision?.action).toBe('CREATE'); });
+  it('existing preference -> UPDATE with source preserved', async () => { const service = new MemoryService({ workspace: await root() }); const first = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/p.md', summary: 'P', content: 'old', sourceEvidence: ['old'] })); await service.apply(ProposalSchema.parse({ action: 'UPDATE', path: 'preferences/p.md', summary: 'P', content: 'new', sourceEvidence: ['new'], expectedHash: first.revision!.afterHash })); expect((await service.read('preferences/p.md')).metadata.sources).toEqual(['old', 'new']); });
+  it('duplicate -> IGNORE without revision/document change', async () => { const service = new MemoryService({ workspace: await root() }); await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/p.md', summary: 'P', content: 'same', sourceEvidence: ['h'] })); const result = await service.apply(ProposalSchema.parse({ action: 'IGNORE', reason: 'duplicate', sourceEvidence: ['h'] })); expect(result.trace.result).toBe('ignored'); });
+  it('conflict -> stale UPDATE rejects while old evidence remains', async () => { const service = new MemoryService({ workspace: await root() }); const first = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/p.md', summary: 'P', content: 'old', sourceEvidence: ['old'] })); await expect(service.apply(ProposalSchema.parse({ action: 'UPDATE', path: 'preferences/p.md', summary: 'P', content: 'bad', sourceEvidence: ['new'], expectedHash: '0'.repeat(64) }))).rejects.toThrow(); expect((await service.read('preferences/p.md')).metadata.sources).toEqual(['old']); expect(first.accepted).toBe(true); });
+  it('temporary fact -> IGNORE', async () => { const service = new MemoryService({ workspace: await root() }); expect((await service.apply(ProposalSchema.parse({ action: 'IGNORE', reason: 'temporary', sourceEvidence: ['h'] }))).trace.result).toBe('ignored'); });
+  it('recomputable statistic -> IGNORE', async () => { const service = new MemoryService({ workspace: await root() }); expect((await service.apply(ProposalSchema.parse({ action: 'IGNORE', reason: 'recomputable', sourceEvidence: ['h'] }))).trace.result).toBe('ignored'); });
+  it('explicit remember -> immediate controlled write', async () => { const service = new MemoryService({ workspace: await root() }); await service.rememberExplicit({ path: 'contexts/explicit.md', summary: 'Explicit', content: 'remembered', sourceEvidence: ['user'] }); expect((await service.read('contexts/explicit.md')).content).toBe('remembered'); });
+  it('cursor -> no repeated consumption', async () => { const service = new MemoryService({ workspace: await root(), compressor: { compress: () => 'summary' } }); expect(await service.consume([e(1)])).not.toBeNull(); expect(await service.consume([e(1)])).toBeNull(); });
+
+  it('parses valid Dream proposals and rejects invalid proposals without filesystem access', async () => {
+    const dream = new DreamService({ propose: () => [{ action: 'IGNORE', reason: 'temporary', sourceEvidence: ['h'] }] });
+    expect((await dream.dream({ newHistory: [], profile: '', index: '', relevantMemories: [] }))[0].action).toBe('IGNORE');
+    await expect(new DreamService({ propose: () => [{ action: 'CREATE', path: '../escape.md' }] }).dream({ newHistory: [], profile: '', index: '', relevantMemories: [] })).rejects.toThrow();
+  });
+
+  it('MERGE archives the source and updates the target', async () => { const service = new MemoryService({ workspace: await root() }); await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/source.md', summary: 'Source', content: 'source', sourceEvidence: ['s'] })); const target = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/target.md', summary: 'Target', content: 'target', sourceEvidence: ['t'] })); const source = await service.read('preferences/source.md'); await service.apply(ProposalSchema.parse({ action: 'MERGE', path: 'preferences/source.md', targetPath: 'preferences/target.md', summary: 'Merged', content: 'merged', sourceEvidence: ['m'], expectedHash: source.hash })); expect((await service.read('preferences/target.md')).content).toBe('merged'); await expect(service.read('archive/source.md')).resolves.toBeDefined(); expect(target.accepted).toBe(true); });
+
+  it('recovers an archive pending journal without duplicate revision', async () => { const workspace = await root(); const service = new MemoryService({ workspace }); const created = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/recover.md', summary: 'Recover', content: 'body', sourceEvidence: ['h'] })); const hash = created.revision!.afterHash!; const pendingRevision = RevisionSchema.parse({ revisionId: 'archive-recovery', time: '2026-01-01T00:00:00Z', actor: 'test', action: 'ARCHIVE', path: 'preferences/recover.md', source: ['crash'], beforeHash: hash, afterHash: hash }); await writeJsonAtomic(service.paths.state, { memoryCursor: {}, pendingMutation: { action: 'ARCHIVE', path: 'preferences/recover.md', targetPath: 'archive/recover.md', source: ['crash'], beforeHash: hash, archiveHash: hash, afterHash: hash, afterRaw: (await service.read('preferences/recover.md')).raw, revision: pendingRevision } }); const restarted = new MemoryService({ workspace }); await expect(restarted.read('archive/recover.md')).resolves.toBeDefined(); await restarted.apply(ProposalSchema.parse({ action: 'IGNORE', reason: 'wake again', sourceEvidence: ['test'] })); const revisions = (await readFile(service.paths.revisions, 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line)); expect(revisions.filter((revision) => revision.revisionId === 'archive-recovery')).toHaveLength(1); });
+});
+
+describe('conversation batch validation', () => {
+  it('rejects duplicate and non-monotonic events', async () => { const consolidator = new CursorConsolidator({ workspace: await root(), compressor: { compress: () => 'summary' } }); await expect(consolidator.consume([e(1), e(1)])).rejects.toThrow(); await expect(consolidator.consume([e(2), e(1)])).rejects.toThrow(); });
+});
