@@ -19,7 +19,7 @@ describe('fail-closed pending recovery', () => {
     const archiveRaw = await readFile(service.paths.categories.archive + '/a.md', 'utf8');
     await writeFile(service.paths.categories.preferences + '/a.md', source.raw.replace('old', 'changed'));
     const revision = RevisionSchema.parse({ revisionId: 'archive-changed', time: '2026-01-01T00:00:00Z', actor: 'test', action: 'ARCHIVE', path: 'preferences/a.md', source: ['crash'], beforeHash: hash, afterHash: hash });
-    await writeJsonAtomic(service.paths.state, { memoryCursor: {}, pendingMutation: { action: 'ARCHIVE', path: 'preferences/a.md', targetPath: 'archive/a.md', source: ['crash'], beforeHash: hash, archiveHash: hash, afterHash: hash, afterRaw: archiveRaw, revision } });
+    await writeJsonAtomic(service.paths.state, { memoryCursor: {}, pendingMutation: { action: 'ARCHIVE', path: 'preferences/a.md', targetPath: 'archive/a.md', targetBeforeHash: null, source: ['crash'], beforeHash: hash, archiveHash: hash, afterHash: hash, afterRaw: archiveRaw, archiveRaw, revision } });
     const restarted = new MemoryService({ workspace });
     await expect(restarted.read('archive/a.md')).rejects.toThrow();
     expect(await readFile(service.paths.categories.preferences + '/a.md', 'utf8')).toContain('changed');

@@ -13,7 +13,11 @@ import { CursorConsolidator, type CompressorPort, type ConversationEvent, type H
 
 export interface MemoryServiceOptions { workspace?: string; workspaceRoot?: string; workspaceDir?: string; paths?: WorkspacePaths; actor?: string; clock?: () => string; compressor?: CompressorPort; }
 export interface MutationResult { accepted: boolean; action: MemoryProposal['action']; path?: string; revision?: RevisionRecord; trace: { result: string; reason?: string }; }
-const PendingSchema = z.object({ action: z.enum(['MERGE', 'ARCHIVE']), path: z.string().min(1), targetPath: z.string().min(1), writePath: z.string().min(1).optional(), source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), targetBeforeHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema }).strict();
+const PendingCommon = { path: z.string().min(1), targetPath: z.string().min(1), source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema };
+const PendingSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('MERGE'), ...PendingCommon, writePath: z.string().min(1), targetBeforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]) }).strict(),
+  z.object({ action: z.literal('ARCHIVE'), ...PendingCommon, targetBeforeHash: z.null() }).strict(),
+]);
 const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}), pendingMutation: PendingSchema.optional() }).passthrough();
 type State = z.infer<typeof StateSchema>;
 
@@ -98,7 +102,7 @@ export class MemoryService {
     const archivedPath = `archive/${proposal.path.split('/').at(-1)}`;
     const archiveRaw = this.archiveRaw(current, source);
     const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, archiveRaw);
-    await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, source, beforeHash: current.hash, archiveHash: hash(archiveRaw), afterHash: hash(archiveRaw), afterRaw: archiveRaw, archiveRaw, revision });
+    await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, targetBeforeHash: null, source, beforeHash: current.hash, archiveHash: hash(archiveRaw), afterHash: hash(archiveRaw), afterRaw: archiveRaw, archiveRaw, revision });
     await this.completePending();
     return { accepted: true, action: 'ARCHIVE', path: proposal.path, revision, trace: { result: 'applied' } };
   }
@@ -129,7 +133,9 @@ export class MemoryService {
   private async recoverPending(): Promise<void> { const state = await this.readState(); if (!state.pendingMutation) return; await this.completePending(); }
   private async completePending(): Promise<void> {
     const state = await this.readState(); const pending = state.pendingMutation; if (!pending) return;
-    const sourcePath = pathForMemory(this.paths, pending.path); const targetPath = pathForMemory(this.paths, pending.targetPath); const writePath = pending.writePath ?? pending.targetPath;
+    const sourcePath = pathForMemory(this.paths, pending.path); const targetPath = pathForMemory(this.paths, pending.targetPath); const writePath = pending.action === 'MERGE' ? pending.writePath : pending.targetPath;
+    const archiveExistsBefore = await this.fileExists(pending.targetPath);
+    if (archiveExistsBefore && (await this.rawHashAt(targetPath)) !== pending.archiveHash) throw new Error('Pending mutation archive target changed');
     const sourceExistsBefore = await this.exists(pending.path);
     if (sourceExistsBefore && (await this.reader.read(pending.path)).hash !== pending.beforeHash) throw new Error('Pending mutation source changed');
     if (pending.action === 'MERGE') {
