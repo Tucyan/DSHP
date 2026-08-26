@@ -88,7 +88,7 @@ export class MemoryService {
       const target = await this.reader.read(proposal.targetPath);
       const mergedSources = [...new Set([...current.metadata.sources, ...target.metadata.sources, ...source])];
       const raw = renderMemoryDocument(MemoryMetadataSchema.parse({ category: target.metadata.category, summary: proposal.summary, importance: proposal.importance ?? target.metadata.importance, frequency: proposal.frequency ?? target.metadata.frequency, sources: mergedSources, createdAt: target.metadata.createdAt ?? this.clock(), updatedAt: this.clock() }), proposal.content);
-      const archiveRaw = this.archiveRaw(current);
+      const archiveRaw = this.archiveRaw(current, source);
       const revision = this.makeRevision('MERGE', proposal.targetPath, source, target.raw, raw);
       await this.persistPending({ action: 'MERGE', path: proposal.path, writePath: proposal.targetPath, targetPath: `archive/${proposal.path.split('/').at(-1)}`, source, beforeHash: hash(current.raw), targetBeforeHash: hash(target.raw), archiveHash: hash(archiveRaw), afterHash: hash(raw), afterRaw: raw, archiveRaw, revision });
       await this.completePending();
@@ -96,7 +96,7 @@ export class MemoryService {
     }
     if (proposal.path.startsWith('archive/')) throw new Error('Memory is already archived');
     const archivedPath = `archive/${proposal.path.split('/').at(-1)}`;
-    const archiveRaw = this.archiveRaw(current);
+    const archiveRaw = this.archiveRaw(current, source);
     const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, archiveRaw);
     await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, source, beforeHash: current.hash, archiveHash: hash(archiveRaw), afterHash: hash(archiveRaw), afterRaw: archiveRaw, archiveRaw, revision });
     await this.completePending();
@@ -134,7 +134,15 @@ export class MemoryService {
     if (sourceExistsBefore && (await this.reader.read(pending.path)).hash !== pending.beforeHash) throw new Error('Pending mutation source changed');
     if (pending.action === 'MERGE') {
       const targetExists = await this.exists(writePath);
-      if (!targetExists || (await this.reader.read(writePath)).hash !== pending.afterHash) await this.writeRaw(writePath, pending.afterRaw);
+      if (targetExists) {
+        const targetHash = (await this.reader.read(writePath)).hash;
+        if (targetHash !== pending.afterHash && (!pending.targetBeforeHash || targetHash !== pending.targetBeforeHash)) throw new Error('Pending mutation target changed');
+      } else if (pending.targetBeforeHash) {
+        throw new Error('Pending mutation target disappeared');
+      } else {
+        await this.writeRaw(writePath, pending.afterRaw);
+      }
+      if (targetExists && (await this.reader.read(writePath)).hash === pending.targetBeforeHash) await this.writeRaw(writePath, pending.afterRaw);
     }
     const sourceExists = await this.exists(pending.path); const targetExists = await this.fileExists(pending.targetPath);
     if (sourceExists && !targetExists) { await mkdir(dirname(targetPath), { recursive: true }); await rename(sourcePath, targetPath); }
@@ -150,7 +158,7 @@ export class MemoryService {
   private async fileExists(path: string): Promise<boolean> { try { await readFile(pathForMemory(this.paths, path)); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
   private async rawHashAt(path: string): Promise<string> { return hash(await readFile(path)); }
   private async rebuildProjections(): Promise<void> { const documents = await this.reader.list(); await this.writeProjection(this.paths.index, renderIndex(documents)); await this.writeProjection(this.paths.profile, renderProfile(documents)); }
-  private archiveRaw(document: Awaited<ReturnType<MemoryReader['read']>>): string { return renderMemoryDocument(MemoryMetadataSchema.parse({ ...document.metadata, category: 'archive' }), document.content); }
+  private archiveRaw(document: Awaited<ReturnType<MemoryReader['read']>>, additionalSources: readonly string[] = []): string { return renderMemoryDocument(MemoryMetadataSchema.parse({ ...document.metadata, category: 'archive', sources: [...new Set([...document.metadata.sources, ...additionalSources])] }), document.content); }
   private async writeProjection(path: string, value: string): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.${Date.now()}.tmp`; try { await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
 }
 

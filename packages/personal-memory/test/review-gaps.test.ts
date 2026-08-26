@@ -49,6 +49,7 @@ describe('reviewed memory invariants', () => {
     const archived = await service.read('archive/a.md');
     expect(archived.metadata.summary).toBe('Keep this');
     expect(archived.content).toBe('original body');
+    expect(archived.metadata.sources).toEqual(['evidence', 'archive-reason']);
     await expect(service.read('preferences/a.md')).rejects.toThrow();
   });
 
