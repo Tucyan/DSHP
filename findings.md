@@ -49,6 +49,8 @@
 | Keep heartbeat delivery idempotent and record occurrence keys | DSH Schedule is at-least-once around crash windows and background scheduling is outside cold Sessions |
 | Use DSH Session as the conversation source while retaining domain-owned semantic memory files | Avoids duplicating raw chat persistence while preserving the requested Memory Tree semantics |
 | Persistence read APIs require Zod schemas | Syntactically valid but structurally invalid state must fail at the boundary rather than flow into domain logic |
+| Memory uses one recoverable workspace writer boundary | Consolidation, proposals, projections, cursors, and revisions share crash recovery and cannot overwrite one another |
+| Cordis service construction is filesystem-lazy | Bundle registration must not create project data or launch unowned asynchronous work before first use |
 
 ## Issues Encountered
 
@@ -57,6 +59,7 @@
 | No existing codebase to follow | Establish a minimal pnpm/TypeScript monorepo with focused packages and explicit ports |
 | Live DSH and QQ may require downloads/credentials | Separate contract-level automated verification from optional live smoke tests |
 | Initial lint script only performed typechecking | Spec review caught it; added an actual ESLint flat configuration and exact dependencies |
+| No-config Memory plugin polluted the repository with a writer lock | Systematic debugging traced eager `MemoryService` construction; changed plugin and startup to lazy, caller-owned initialization |
 
 ## Resources
 

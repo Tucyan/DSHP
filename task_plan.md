@@ -30,7 +30,7 @@ Phase 2
 ### Phase 3: Core, Memory, and Heartbeat Plugins
 
 - [x] Implement `personal-agent-core` using TDD
-- [ ] Implement `personal-memory` using TDD
+- [x] Implement `personal-memory` using TDD
 - [ ] Implement `personal-heartbeat` using TDD
 - [ ] Run spec-compliance and code-quality reviews after every implementation task
 - **Status:** pending
