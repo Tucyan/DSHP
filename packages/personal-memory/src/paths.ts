@@ -1,7 +1,9 @@
 import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { z } from 'zod';
 
 export const MEMORY_CATEGORIES = ['preferences', 'contexts', 'decisions', 'events', 'archive'] as const;
 export type MemoryCategory = typeof MEMORY_CATEGORIES[number];
+export const SafeMemoryPathSchema = z.string().superRefine((value, ctx) => { try { assertMemoryPath(value); } catch (error) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: error instanceof Error ? error.message : 'Invalid memory path' }); } });
 
 export interface WorkspacePaths {
   root: string;

@@ -1,24 +1,28 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { appendJsonl, readJson, readJsonl, writeJsonAtomic } from '@personal-growth/shared';
 import { renderIndex } from './index-builder.js';
 import { renderProfile } from './profile-builder.js';
-import { pathForMemory, workspacePaths, type WorkspacePaths } from './paths.js';
+import { SafeMemoryPathSchema, pathForMemory, workspacePaths, type WorkspacePaths } from './paths.js';
 import { ProposalSchema, type MemoryProposal } from './proposal.js';
-import { MemoryReader, MemoryMetadataSchema, renderMemoryDocument } from './reader.js';
+import { assertWorkspacePath, MemoryReader, MemoryMetadataSchema, renderMemoryDocument } from './reader.js';
 import { RevisionSchema, type RevisionRecord } from './revision.js';
 import { CursorConsolidator, type CompressorPort, type ConversationEvent, type HistoryRecord } from './consolidator.js';
+import { withWorkspaceLock } from './lock.js';
 
 export interface MemoryServiceOptions { workspace?: string; workspaceRoot?: string; workspaceDir?: string; paths?: WorkspacePaths; actor?: string; clock?: () => string; compressor?: CompressorPort; }
 export interface MutationResult { accepted: boolean; action: MemoryProposal['action']; path?: string; revision?: RevisionRecord; trace: { result: string; reason?: string }; }
-const PendingCommon = { path: z.string().min(1), targetPath: z.string().min(1), source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema };
+const DocumentPendingCommon = { path: SafeMemoryPathSchema, beforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), revision: RevisionSchema };
+const PendingCommon = { path: SafeMemoryPathSchema, targetPath: SafeMemoryPathSchema, source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema };
 const PendingSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('MERGE'), ...PendingCommon, writePath: z.string().min(1), targetBeforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]) }).strict(),
+  z.object({ action: z.literal('CREATE'), ...DocumentPendingCommon }).strict(),
+  z.object({ action: z.literal('UPDATE'), ...DocumentPendingCommon }).strict(),
+  z.object({ action: z.literal('MERGE'), ...PendingCommon, writePath: SafeMemoryPathSchema, targetBeforeHash: z.union([z.string().regex(/^[a-f0-9]{64}$/i), z.null()]) }).strict(),
   z.object({ action: z.literal('ARCHIVE'), ...PendingCommon, targetBeforeHash: z.null() }).strict(),
 ]);
-const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}), pendingMutation: PendingSchema.optional() }).passthrough();
+const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}), pendingMutation: PendingSchema.optional() }).strict();
 type State = z.infer<typeof StateSchema>;
 
 export class MemoryService {
@@ -35,8 +39,8 @@ export class MemoryService {
     this.reader = new MemoryReader(this.paths);
     this.actor = options.actor ?? 'personal-memory';
     this.clock = options.clock ?? (() => new Date().toISOString());
-    if (options.compressor) this.consolidator = new CursorConsolidator({ paths: this.paths, compressor: options.compressor, clock: this.clock });
-    this.ready = this.recoverPending();
+    if (options.compressor) this.consolidator = new CursorConsolidator({ paths: this.paths, compressor: options.compressor, clock: this.clock, manageLock: false });
+    this.ready = withWorkspaceLock(this.paths.root, () => this.recoverPending());
   }
 
   list(category?: Parameters<MemoryReader['list']>[0]) { return this.ready.then(() => this.reader.list(category)); }
@@ -44,12 +48,16 @@ export class MemoryService {
   search(query: string, limit?: number) { return this.ready.then(() => this.reader.search(query, limit)); }
   async readProfile(): Promise<string> { await this.ready; try { return await readFile(this.paths.profile, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
   async readIndex(): Promise<string> { await this.ready; try { return await readFile(this.paths.index, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
-  consume(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> { if (!this.consolidator) return Promise.reject(new Error('No compressor is configured')); return this.consolidator.consume(events); }
+  consume(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> {
+    if (!this.consolidator) return Promise.reject(new Error('No compressor is configured'));
+    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, () => this.consolidator!.consume(events)); });
+    this.queue = operation.catch(() => undefined); return operation;
+  }
   consolidate(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> { return this.consume(events); }
 
   apply(proposal: MemoryProposal): Promise<MutationResult> {
     const parsed = ProposalSchema.parse(proposal);
-    const operation = this.queue.then(async () => { await this.ready; await this.recoverPending(); return this.applyNow(parsed); });
+    const operation = this.queue.then(async () => { await this.ready; return withWorkspaceLock(this.paths.root, async () => { await this.recoverPending(); return this.applyNow(parsed); }); });
     this.queue = operation.catch(() => undefined);
     return operation;
   }
@@ -77,15 +85,19 @@ export class MemoryService {
     const source = proposal.sourceEvidence;
     if (proposal.action === 'CREATE') {
       if (await this.exists(proposal.path)) throw new Error(`Memory already exists: ${proposal.path}`);
-      const raw = await this.writeNew(proposal.path, proposal.summary, proposal.content, source, proposal.importance, proposal.frequency);
-      return this.commitRevision('CREATE', proposal.path, source, undefined, raw);
+      const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, source, proposal.importance, proposal.frequency);
+      const revision = this.makeRevision('CREATE', proposal.path, source, undefined, raw);
+      await this.persistPending({ action: 'CREATE', path: proposal.path, beforeHash: null, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
+      return { accepted: true, action: 'CREATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
     const current = await this.reader.read(proposal.path);
     if ('expectedHash' in proposal && current.hash !== proposal.expectedHash) throw new Error(`Stale memory proposal for ${proposal.path}`);
     if (proposal.action === 'UPDATE') {
       const mergedSources = [...new Set([...current.metadata.sources, ...source])];
-      const raw = await this.writeNew(proposal.path, proposal.summary, proposal.content, mergedSources, proposal.importance ?? current.metadata.importance, proposal.frequency ?? current.metadata.frequency, current.metadata.createdAt);
-      return this.commitRevision('UPDATE', proposal.path, source, current.raw, raw);
+      const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, mergedSources, proposal.importance ?? current.metadata.importance, proposal.frequency ?? current.metadata.frequency, current.metadata.createdAt);
+      const revision = this.makeRevision('UPDATE', proposal.path, source, current.raw, raw);
+      await this.persistPending({ action: 'UPDATE', path: proposal.path, beforeHash: current.hash, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
+      return { accepted: true, action: 'UPDATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
     if (proposal.action === 'MERGE') {
       if (proposal.path === proposal.targetPath) throw new Error('Cannot merge a memory document into itself');
@@ -108,17 +120,23 @@ export class MemoryService {
   }
 
   private async exists(path: string): Promise<boolean> { try { await this.reader.read(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
-  private async writeNew(path: string, summary: string, content: string, sources: string[], importance = 'normal', frequency = 'normal', createdAt?: string): Promise<string> {
+  private buildRaw(path: string, summary: string, content: string, sources: string[], importance = 'normal', frequency = 'normal', createdAt?: string): string {
     const metadata = MemoryMetadataSchema.parse({ category: path.split('/')[0], summary, importance, frequency, sources, createdAt: createdAt ?? this.clock(), updatedAt: this.clock() });
-    const raw = renderMemoryDocument(metadata, content);
+    return renderMemoryDocument(metadata, content);
+  }
+  private async writeNew(path: string, summary: string, content: string, sources: string[], importance = 'normal', frequency = 'normal', createdAt?: string): Promise<string> {
+    const raw = this.buildRaw(path, summary, content, sources, importance, frequency, createdAt);
     const target = pathForMemory(this.paths, path);
+    await assertWorkspacePath(this.paths, target);
     await mkdir(dirname(target), { recursive: true });
-    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    const temporary = `${target}.${randomUUID()}.tmp`;
     try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; }
     return raw;
   }
   private async commitRevision(action: 'CREATE' | 'UPDATE' | 'MERGE' | 'ARCHIVE', path: string, source: string[], beforeRaw: string | undefined, afterRaw: string): Promise<MutationResult> {
     const revision = this.makeRevision(action, path, source, beforeRaw, afterRaw);
+    const existing = await readJsonl(this.paths.revisions, RevisionSchema);
+    if (existing.errors.length) throw new Error(`Malformed revisions.jsonl: ${existing.errors.map((error) => error.line).join(',')}`);
     await appendJsonl(this.paths.revisions, revision);
     await this.rebuildProjections();
     return { accepted: true, action, path, revision, trace: { result: 'applied' } };
@@ -133,7 +151,25 @@ export class MemoryService {
   private async recoverPending(): Promise<void> { const state = await this.readState(); if (!state.pendingMutation) return; await this.completePending(); }
   private async completePending(): Promise<void> {
     const state = await this.readState(); const pending = state.pendingMutation; if (!pending) return;
+    if (pending.action === 'CREATE' || pending.action === 'UPDATE') {
+      const target = pathForMemory(this.paths, pending.path); const exists = await this.fileExists(pending.path);
+      if (pending.action === 'CREATE') {
+        if (exists && (await this.rawHashAt(target)) !== pending.afterHash) throw new Error('Pending CREATE target conflict');
+        if (!exists) await this.writeRaw(pending.path, pending.afterRaw);
+      } else {
+        if (!exists) throw new Error('Pending UPDATE target disappeared');
+        const currentHash = await this.rawHashAt(target);
+        if (currentHash !== pending.afterHash) {
+          if (pending.beforeHash === null || currentHash !== pending.beforeHash) throw new Error('Pending UPDATE target changed');
+          await this.writeRaw(pending.path, pending.afterRaw);
+        }
+      }
+      const revisions = await readJsonl(this.paths.revisions, RevisionSchema); if (revisions.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisions.errors.map((error) => error.line).join(',')}`);
+      if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) await appendJsonl(this.paths.revisions, pending.revision);
+      await this.rebuildProjections(); delete state.pendingMutation; await writeJsonAtomic(this.paths.state, state); return;
+    }
     const sourcePath = pathForMemory(this.paths, pending.path); const targetPath = pathForMemory(this.paths, pending.targetPath); const writePath = pending.action === 'MERGE' ? pending.writePath : pending.targetPath;
+    await assertWorkspacePath(this.paths, sourcePath); await assertWorkspacePath(this.paths, targetPath); await assertWorkspacePath(this.paths, pathForMemory(this.paths, writePath));
     const archiveExistsBefore = await this.fileExists(pending.targetPath);
     if (archiveExistsBefore && (await this.rawHashAt(targetPath)) !== pending.archiveHash) throw new Error('Pending mutation archive target changed');
     const sourceExistsBefore = await this.exists(pending.path);
@@ -156,16 +192,17 @@ export class MemoryService {
     else if (!sourceExists && !targetExists) throw new Error('Pending mutation lost both source and target');
     if ((await this.rawHashAt(targetPath)) !== pending.archiveHash) await this.writeRaw(pending.targetPath, pending.archiveRaw);
     const revisions = await readJsonl(this.paths.revisions, RevisionSchema);
+    if (revisions.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisions.errors.map((error) => error.line).join(',')}`);
     if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) await appendJsonl(this.paths.revisions, pending.revision);
     await this.rebuildProjections();
     delete state.pendingMutation; await writeJsonAtomic(this.paths.state, state);
   }
-  private async writeRaw(path: string, raw: string): Promise<void> { const target = pathForMemory(this.paths, path); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${process.pid}.${Date.now()}.tmp`; try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
+  private async writeRaw(path: string, raw: string): Promise<void> { const target = pathForMemory(this.paths, path); await assertWorkspacePath(this.paths, target); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${randomUUID()}.tmp`; try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
   private async fileExists(path: string): Promise<boolean> { try { await readFile(pathForMemory(this.paths, path)); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
   private async rawHashAt(path: string): Promise<string> { return hash(await readFile(path)); }
   private async rebuildProjections(): Promise<void> { const documents = await this.reader.list(); await this.writeProjection(this.paths.index, renderIndex(documents)); await this.writeProjection(this.paths.profile, renderProfile(documents)); }
   private archiveRaw(document: Awaited<ReturnType<MemoryReader['read']>>, additionalSources: readonly string[] = []): string { return renderMemoryDocument(MemoryMetadataSchema.parse({ ...document.metadata, category: 'archive', sources: [...new Set([...document.metadata.sources, ...additionalSources])] }), document.content); }
-  private async writeProjection(path: string, value: string): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.${Date.now()}.tmp`; try { await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
+  private async writeProjection(path: string, value: string): Promise<void> { await assertWorkspacePath(this.paths, path); await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${randomUUID()}.tmp`; try { await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
 }
 
 export interface ExplicitMemoryInput { path?: string; summary: string; content: string; sourceEvidence?: string[]; importance?: 'low' | 'normal' | 'high'; frequency?: 'low' | 'normal' | 'high'; expectedHash?: string; }

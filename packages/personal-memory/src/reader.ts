@@ -1,5 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { MEMORY_CATEGORIES, type MemoryCategory, pathForMemory, workspacePaths, type WorkspacePaths } from './paths.js';
 
@@ -43,6 +43,7 @@ export class MemoryReader {
     const results: MemoryDocument[] = [];
     for (const current of categories) {
       const dir = this.paths.categories[current];
+      await assertWorkspacePath(this.paths, dir);
       let names: string[];
       try { names = await markdownFiles(dir); } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
@@ -55,6 +56,7 @@ export class MemoryReader {
 
   async read(memoryPath: string): Promise<MemoryDocument> {
     const path = pathForMemory(this.paths, memoryPath);
+    await assertWorkspacePath(this.paths, path);
     const raw = await readFile(path, 'utf8');
     const parsed = parseMemoryDocument(raw);
     if (parsed.metadata.category !== memoryPath.split('/')[0]) throw new Error('Memory metadata category mismatch');
@@ -67,6 +69,28 @@ export class MemoryReader {
     const needle = query.toLocaleLowerCase();
     const documents = await this.list();
     return documents.filter((document) => `${document.metadata.summary}\n${document.content}`.toLocaleLowerCase().includes(needle)).slice(0, Math.max(0, limit));
+  }
+}
+
+export async function assertWorkspacePath(paths: WorkspacePaths, target: string): Promise<void> {
+  const workspace = resolve(paths.root);
+  const candidates: string[] = [];
+  let current = resolve(target);
+  const lexical = relative(workspace, current);
+  if (lexical.startsWith('..') || isAbsolute(lexical)) throw new Error(`Workspace path escapes root: ${target}`);
+  while (current !== workspace) { candidates.push(current); current = dirname(current); }
+  candidates.push(workspace);
+  for (const candidate of candidates.reverse()) {
+    try {
+      const stat = await lstat(candidate);
+      if (stat.isSymbolicLink()) throw new Error(`Symlinked workspace path is not allowed: ${candidate}`);
+      const real = await realpath(candidate);
+      const relativeReal = relative(workspace, real);
+      if (relativeReal.startsWith('..') || resolve(workspace, relativeReal) !== real) throw new Error(`Workspace path escapes root: ${candidate}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
   }
 }
 
