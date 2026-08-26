@@ -1,0 +1,10 @@
+# Fail-closed fallback applied to every non-live runtime start.
+- id: im-qqbot
+  name: '@tencent-connect/dsh-qqbot'
+  disabled: true
+  config:
+    access:
+      c2cMode: disabled
+      c2cAllow: []
+      groupMode: disabled
+      groupAllow: []

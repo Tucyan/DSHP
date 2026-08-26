@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildTencentQqProfilePatch, TENCENT_QQ_ENV } from '../../qq-adapter/src/tencent.js';
@@ -42,5 +42,35 @@ describe('pinned live integration contract', () => {
     expect(warnings).toEqual([]);
     expect(rows.filter((row: { id?: string }) => row.id === 'im-qqbot')).toHaveLength(1);
     expect(rows.find((row: { id?: string }) => row.id === 'im-qqbot')).toMatchObject({ name: '@tencent-connect/dsh-qqbot', disabled: false, config: { access: { c2cMode: 'allowlist', c2cAllow: ['123'], groupMode: 'disabled' } } });
+  });
+  it('parses the published patch and generated overlay as YAML before composing them', async () => {
+    const store = [path.resolve('node_modules/.pnpm'), path.resolve('../../node_modules/.pnpm')].find((candidate) => existsSync(candidate));
+    if (!store) throw new Error('cached pnpm store is required for this contract test');
+    const packageRoot = readdirSync(store).map((name) => path.join(store, name, 'node_modules/@tencent-connect/dsh-qqbot')).find((candidate) => existsSync(path.join(candidate, 'cordis.patch.yml')));
+    const yamlRoot = readdirSync(store).map((name) => path.join(store, name, 'node_modules/js-yaml/index.js')).find((candidate) => existsSync(candidate));
+    if (!packageRoot || !yamlRoot) throw new Error('cached Tencent and YAML packages are required for this contract test');
+    const { load } = await import(pathToFileURL(yamlRoot).href);
+    const includeDir = readdirSync(store).map((name) => path.join(store, name, 'node_modules/@deepseek-ai/cordis-plugin-include/lib/index.js')).find((candidate) => existsSync(candidate));
+    if (!includeDir) throw new Error('cached cordis-plugin-include is required for this contract test');
+    const { applyEntryPatches } = await import(pathToFileURL(includeDir).href);
+    const official = load(readFileSync(path.join(packageRoot, 'cordis.patch.yml'), 'utf8')) as Array<{ insert?: unknown[] }>;
+    const generated = load(buildTencentQqProfilePatch('123')) as Array<{ id?: string; name?: string; config?: { access?: Record<string, unknown> } }>;
+    expect(Array.isArray(official)).toBe(true);
+    expect(Array.isArray(generated)).toBe(true);
+    const officialRows = official.flatMap((patch) => patch.insert ?? []);
+    expect(officialRows).toHaveLength(1);
+    expect(generated).toHaveLength(1);
+    const warnings: string[] = [];
+    const result = applyEntryPatches([{ id: 'base', name: 'base', group: true, config: [] }], [...official, ...generated], (message: string) => warnings.push(message));
+    const rows = result as Array<{ id?: string; name?: string; disabled?: boolean; config?: { access?: Record<string, unknown> } }>;
+    expect(warnings).toEqual([]);
+    expect(rows.filter((row) => row.id === 'im-qqbot')).toHaveLength(1);
+    expect(rows.find((row) => row.id === 'im-qqbot')).toMatchObject({ name: '@tencent-connect/dsh-qqbot', disabled: false, config: { access: { c2cAllow: ['123'], groupMode: 'disabled' } } });
+  });
+  it('accepts the same managed peer on restart and rejects a changed peer', async () => {
+    const patch = buildTencentQqProfilePatch('123');
+    const { assertManagedQqProfile } = await import('../../../scripts/validate-qq-profile.mjs');
+    expect(() => assertManagedQqProfile(patch, '123')).not.toThrow();
+    expect(() => assertManagedQqProfile(patch, '456')).toThrow(/mismatch|peer/i);
   });
 });

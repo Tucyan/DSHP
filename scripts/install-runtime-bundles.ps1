@@ -9,6 +9,29 @@ $config = (& node (Join-Path $PSScriptRoot 'runtime-config.mjs') --json | Conver
 if ($LASTEXITCODE -ne 0) { throw "Isolated runtime initialization failed with exit code $LASTEXITCODE" }
 $env:DSH_HOME = $config.dshHome
 $env:DSH_AGENTS_HOME = $config.agentsHome
+$profilePatch = Join-Path $config.dshHome 'profiles/web/cordis.patch.yml'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePatch) | Out-Null
+$patchText = (& node (Join-Path $PSScriptRoot 'render-qq-profile.mjs') --peer-id $PeerId | Out-String).TrimEnd()
+if ($LASTEXITCODE -ne 0) { throw "QQ profile rendering failed with exit code $LASTEXITCODE" }
+$marker = 'Personal Growth Agent QQ profile'
+function Write-AtomicText([string]$path, [string]$content) {
+  $temp = "$path.$PID.tmp"
+  Set-Content -LiteralPath $temp -Value $content -Encoding utf8
+  Move-Item -LiteralPath $temp -Destination $path -Force
+}
+if (Test-Path -LiteralPath $profilePatch) {
+  $existingPatch = Get-Content -LiteralPath $profilePatch -Raw
+  if ($existingPatch.Contains($marker)) {
+    & node (Join-Path $PSScriptRoot 'validate-qq-profile.mjs') --file $profilePatch --peer-id $PeerId
+    if ($LASTEXITCODE -ne 0) { throw 'managed QQ profile binding mismatch' }
+  } elseif ($existingPatch -match '(?m)^\s*-\s+id:\s+im-qqbot\s*$') {
+    throw 'existing QQ profile contains an unmanaged im-qqbot row'
+  } else {
+    Write-AtomicText $profilePatch (($existingPatch.TrimEnd() + "`n" + $patchText + "`n"))
+  }
+} else {
+  Write-AtomicText $profilePatch ($patchText + "`n")
+}
 Push-Location $config.workspace
 try {
   foreach ($bundle in @('packages/agent-core','packages/personal-memory','packages/personal-heartbeat')) {
@@ -17,35 +40,5 @@ try {
   }
   & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh plugin --profile web add '@tencent-connect/dsh-qqbot@0.4.0'
   if ($LASTEXITCODE -ne 0) { throw "Tencent QQ bundle installation failed with exit code $LASTEXITCODE" }
-  $profilePatch = Join-Path $config.dshHome 'profiles/web/cordis.patch.yml'
-  $patchText = @"
-# Personal Growth Agent QQ profile
-- id: im-qqbot
-  name: '@tencent-connect/dsh-qqbot'
-  disabled: false
-  config:
-    appId: __FROM_ENV__
-    appSecret: __FROM_ENV__
-    provider: deepseek-official
-    model: deepseek-chat
-    preset: personal-growth
-    cwd: workspace
-    groupPrompt: ''
-    directPrompt: ''
-    textChunkLimit: 4500
-    sessionIdleTimeout: 1800000
-    maxQueue: 20
-    processingTimeoutMs: 120000
-    historyLimit: 10
-    access:
-      c2cMode: allowlist
-      c2cAllow: ["$PeerId"]
-      groupMode: disabled
-      groupAllow: []
-    requireMention: true
-    debug: false
-"@
-  if (-not (Test-Path -LiteralPath $profilePatch)) { Set-Content -LiteralPath $profilePatch -Value $patchText -Encoding utf8 }
-  elseif (-not ((Get-Content -LiteralPath $profilePatch -Raw).Contains('Personal Growth Agent QQ profile'))) { Add-Content -LiteralPath $profilePatch -Value ("`n# Personal Growth Agent QQ profile`n" + $patchText) -Encoding utf8 }
 } finally { Pop-Location }
 Write-Output 'Installed the pinned Tencent QQ bundle into the isolated DSH web profile.'
