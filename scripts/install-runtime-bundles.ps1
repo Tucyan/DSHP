@@ -11,8 +11,8 @@ $env:DSH_HOME = $config.dshHome
 $env:DSH_AGENTS_HOME = $config.agentsHome
 Push-Location $repo
 try {
-  & corepack pnpm@11.7.0 --filter @personal-growth/qq-adapter build
-  if ($LASTEXITCODE -ne 0) { throw "QQ adapter build failed with exit code $LASTEXITCODE" }
+  & corepack pnpm@11.7.0 build
+  if ($LASTEXITCODE -ne 0) { throw "Project build failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }
 $profilePatch = Join-Path $config.dshHome 'profiles/web/cordis.patch.yml'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePatch) | Out-Null

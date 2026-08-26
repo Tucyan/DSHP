@@ -39,8 +39,8 @@ describe('runtime launcher isolation', () => {
     expect(script).not.toMatch(/^\s*c2cAllow:\s*\["\$PeerId"\]/m);
     expect(script).toContain('managed QQ profile binding mismatch');
     expect(script.indexOf('$patchText')).toBeLessThan(script.indexOf('dsh plugin --profile web add'));
-    expect(script).toContain("--filter @personal-growth/qq-adapter build");
-    expect(script.indexOf('@personal-growth/qq-adapter build')).toBeLessThan(script.indexOf('render-qq-profile.mjs'));
+    expect(script).toContain('corepack pnpm@11.7.0 build');
+    expect(script.indexOf('corepack pnpm@11.7.0 build')).toBeLessThan(script.indexOf('render-qq-profile.mjs'));
     expect(script.indexOf('render-qq-profile.mjs')).toBeLessThan(script.indexOf('dsh plugin --profile web add'));
     const launcher = readFileSync(path.resolve('scripts/start-runtime.ps1'), 'utf8');
     expect(launcher).not.toMatch(/&\s+dsh(?:\s|$)/i);
