@@ -1,0 +1,19 @@
+{
+  "name": "@personal-growth/personal-heartbeat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "cordis.patch.yml"],
+  "dsh.bundle.patch": "cordis.patch.yml",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": {
+    "test": "vitest run --root ../.. packages/personal-heartbeat/test",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": { "@personal-growth/shared": "workspace:*", "zod": "3.25.76" },
+  "peerDependencies": { "@deepseek-ai/cordis": "4.0.1" },
+  "devDependencies": { "@deepseek-ai/cordis": "4.0.1" }
+}

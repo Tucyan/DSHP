@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/shared" },
     { "path": "packages/agent-core" },
-    { "path": "packages/personal-memory" }
+    { "path": "packages/personal-memory" },
+    { "path": "packages/personal-heartbeat" }
   ]
 }

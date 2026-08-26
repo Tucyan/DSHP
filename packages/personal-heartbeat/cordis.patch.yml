@@ -1,0 +1,5 @@
+bundle:
+  rows:
+    - id: personal-growth-personal-heartbeat
+      package: '@personal-growth/personal-heartbeat'
+      entry: dist/plugin.js

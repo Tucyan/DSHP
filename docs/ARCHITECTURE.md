@@ -67,3 +67,6 @@ workspace/
 6. Skills may be created in the isolated Agents home; plugin code remains a proposal pending human deployment approval.
 7. Credentials are environment references and never enter traces, memory, or committed files.
 
+## Heartbeat v0.1 trust boundary
+
+Heartbeat storage protects against accidental path traversal, pre-existing symlink/junction workspace components, and normal cross-process contention between cooperating workers. It does not defend against a process with host permissions that maliciously replaces the workspace or an ancestor symlink/junction during a check/write window. Full host sandbox isolation is out of scope for v0.1.
