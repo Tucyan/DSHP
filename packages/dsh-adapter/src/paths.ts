@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
 
 export interface IsolatedPaths {
   root: string;
@@ -58,4 +59,28 @@ export function validateIsolatedPaths(paths: IsolatedPaths): void {
 export function launchEnvironment(paths: IsolatedPaths): NodeJS.ProcessEnv {
   validateIsolatedPaths(paths);
   return { ...process.env, DSH_HOME: paths.dshHome, DSH_AGENTS_HOME: paths.agentsHome, DSH_WORKSPACE: paths.workspace };
+}
+
+async function nearestRealPath(value: string): Promise<string> {
+  let current = value;
+  while (true) {
+    try { return await fs.realpath(current); }
+    catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT' && path.dirname(current) !== current) { current = path.dirname(current); continue; }
+      throw error;
+    }
+  }
+}
+
+export async function validateIsolatedPathsAsync(paths: IsolatedPaths): Promise<void> {
+  validateIsolatedPaths(paths);
+  const root = await nearestRealPath(paths.root);
+  const candidates = [paths.dshHome, paths.agentsHome, paths.workspace, paths.plugins, paths.skills, paths.sessions, paths.storage, paths.credentials];
+  for (const candidate of candidates) {
+    const target = normalize(candidate); const ancestor = await nearestRealPath(target); const relative = path.relative(root, ancestor);
+    if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) throw new Error('isolated path resolves outside repository');
+    try { if ((await fs.lstat(target)).isSymbolicLink()) throw new Error('isolated path must not be a symlink'); } catch (error) {
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
+    }
+  }
 }

@@ -73,9 +73,34 @@ describe('DSH schedule adapter', () => {
     expect(failure.code).toBe('ADAPTER_FAILURE');
     expect(failure.message).not.toContain('secret');
   });
+  it('merges independently opened live binding stores', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-schedule-'));
+    const statePath = path.join(dir, 'schedule.json');
+    let sequence = 0;
+    const tool = { create: async () => ({ id: `live-${++sequence}` }), delete: async () => true };
+    const first = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    const second = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await Promise.all([first.create(req, 'one'), second.create({ ...req, prompt: 'two' }, 'two')]);
+    expect(await LiveDshSchedule.open(tool, 'qq:123', statePath, dir).then((schedule) => schedule.list())).toHaveLength(2);
+  });
   it('binds schedules to a session and has no filesystem side effect by default', async () => {
     const schedule = new FakeDshSchedule();
     await schedule.create(req);
     expect((await schedule.list('other'))).toEqual([]);
+  });
+  it('rejects malformed schedule state and compares due times by epoch', async () => {
+    expect(() => new FakeDshSchedule([{ ...req, id: '', idempotencyKey: 'x', createdAt: 'not-a-time', status: 'scheduled', extra: true }])).toThrow();
+    const schedule = new FakeDshSchedule();
+    const binding = await schedule.create({ ...req, at: '2026-08-27T10:00:00.000Z' });
+    expect(schedule.due('2026-08-27T09:00:00.000Z')).toEqual([]);
+    expect(schedule.due('2026-08-27T11:00:00.000Z')).toEqual([{ ...binding, status: 'overdue' }]);
+  });
+  it('merges independent durable schedule writers', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-schedule-'));
+    const statePath = path.join(dir, 'schedule.json');
+    const first = await DshSchedule.open(statePath);
+    const second = await DshSchedule.open(statePath);
+    await Promise.all([first.create(req, 'one'), second.create({ ...req, prompt: 'two' }, 'two')]);
+    expect(await DshSchedule.open(statePath).then((schedule) => schedule.list())).toHaveLength(2);
   });
 });
