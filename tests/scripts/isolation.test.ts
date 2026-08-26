@@ -13,4 +13,15 @@ describe('runtime launcher isolation', () => {
     expect(config.dshHome).not.toBe(path.join(process.env.USERPROFILE ?? '', '.dsh'));
     expect(config.agentsHome).not.toBe(path.join(process.env.USERPROFILE ?? '', '.agents'));
   });
+  it('captures the real PowerShell dry-run command, cwd, full isolated env and args', () => {
+    const script = path.resolve('scripts/start-runtime.ps1');
+    const result = execFileSync('pwsh', ['-NoProfile', '-File', script, '-DryRun'], { encoding: 'utf8', env: { ...process.env, PGA_REPO_ROOT: process.cwd() } });
+    const launch = JSON.parse(result) as { command: string; cwd: string; args: string[]; env: Record<string, string> };
+    expect(launch.command).toBe('dsh');
+    expect(launch.cwd).toBe(path.resolve('workspace'));
+    expect(launch.args).toEqual(['web', '--port', '3180']);
+    for (const key of ['DSH_HOME', 'DSH_AGENTS_HOME', 'PGA_PLUGINS_DIR', 'PGA_SKILLS_DIR', 'PGA_SESSIONS_DIR', 'PGA_STORAGE_DIR', 'PGA_CREDENTIALS_DIR']) expect(launch.env[key]).toContain(path.resolve('runtime').split(path.sep).join(path.sep));
+    expect(launch.env.PGA_RUNTIME_ROOT).toBe(path.resolve('.'));
+    expect(launch.env.DSH_WORKSPACE).toBe(path.resolve('workspace'));
+  });
 });

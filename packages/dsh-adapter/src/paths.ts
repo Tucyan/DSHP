@@ -34,13 +34,6 @@ export function resolveIsolatedPaths(repoRoot: string, webPort = 3180): Isolated
 
 export function validateIsolatedPaths(paths: IsolatedPaths): void {
   const root = normalize(paths.root);
-  const runtime = path.join(root, 'runtime') + path.sep;
-  for (const key of ['dshHome', 'agentsHome', 'plugins', 'skills', 'sessions', 'storage', 'credentials'] as const) {
-    const value = normalize(paths[key]);
-    if (!value.toLowerCase().startsWith(runtime.toLowerCase())) throw new Error(`${key} must stay inside runtime root`);
-  }
-  const workspace = normalize(paths.workspace);
-  if (!workspace.toLowerCase().startsWith(root.toLowerCase() + path.sep)) throw new Error('workspace must stay inside runtime root');
   const userHome = process.env.USERPROFILE ?? process.env.HOME ?? '';
   if (userHome) {
     const defaults = [path.join(userHome, '.dsh'), path.join(userHome, '.agents')];
@@ -48,6 +41,17 @@ export function validateIsolatedPaths(paths: IsolatedPaths): void {
       if (defaults.some((item) => normalize(item).toLowerCase() === normalize(candidate).toLowerCase())) throw new Error('isolated path must not equal the default home');
     }
   }
+  for (const candidate of [paths.dshHome, paths.agentsHome]) {
+    const name = path.basename(normalize(candidate)).toLowerCase();
+    if (name === '.dsh' || name === '.agents') throw new Error('isolated path must not equal the default home');
+  }
+  const runtime = path.join(root, 'runtime') + path.sep;
+  for (const key of ['dshHome', 'agentsHome', 'plugins', 'skills', 'sessions', 'storage', 'credentials'] as const) {
+    const value = normalize(paths[key]);
+    if (!value.toLowerCase().startsWith(runtime.toLowerCase())) throw new Error(`${key} must stay inside runtime root`);
+  }
+  const workspace = normalize(paths.workspace);
+  if (!workspace.toLowerCase().startsWith(root.toLowerCase() + path.sep)) throw new Error('workspace must stay inside runtime root');
   if (!Number.isInteger(paths.webPort) || paths.webPort < 1024 || paths.webPort > 65535) throw new Error('webPort must be between 1024 and 65535');
 }
 
@@ -55,4 +59,3 @@ export function launchEnvironment(paths: IsolatedPaths): NodeJS.ProcessEnv {
   validateIsolatedPaths(paths);
   return { ...process.env, DSH_HOME: paths.dshHome, DSH_AGENTS_HOME: paths.agentsHome, DSH_WORKSPACE: paths.workspace };
 }
-
