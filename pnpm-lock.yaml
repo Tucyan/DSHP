@@ -40,6 +40,19 @@ importers:
         specifier: 4.0.1
         version: 4.0.1
 
+  packages/personal-memory:
+    dependencies:
+      '@personal-growth/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.1
+        version: 4.0.1
+
   packages/shared:
     dependencies:
       zod:

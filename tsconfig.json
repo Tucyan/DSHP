@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/shared" },
-    { "path": "packages/agent-core" }
+    { "path": "packages/agent-core" },
+    { "path": "packages/personal-memory" }
   ]
 }

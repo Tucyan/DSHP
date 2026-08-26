@@ -1,0 +1,5 @@
+bundle:
+  rows:
+    - id: personal-growth-personal-memory
+      package: '@personal-growth/personal-memory'
+      entry: dist/plugin.js
