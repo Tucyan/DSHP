@@ -13,4 +13,4 @@ workspace/data/
 workspace/memory/
 workspace/sessions/
 *.log
-
+*.tsbuildinfo

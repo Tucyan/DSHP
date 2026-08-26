@@ -1,0 +1,22 @@
+{
+  "name": "@personal-growth/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run packages/shared/test",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "3.25.76"
+  }
+}

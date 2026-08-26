@@ -1,0 +1,20 @@
+{
+  "name": "personal-growth-agent",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -b",
+    "build": "tsc -b",
+    "lint": "pnpm typecheck",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.2",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
