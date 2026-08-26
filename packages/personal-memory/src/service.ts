@@ -13,7 +13,7 @@ import { CursorConsolidator, type CompressorPort, type ConversationEvent, type H
 
 export interface MemoryServiceOptions { workspace?: string; workspaceRoot?: string; workspaceDir?: string; paths?: WorkspacePaths; actor?: string; clock?: () => string; compressor?: CompressorPort; }
 export interface MutationResult { accepted: boolean; action: MemoryProposal['action']; path?: string; revision?: RevisionRecord; trace: { result: string; reason?: string }; }
-const PendingSchema = z.object({ action: z.enum(['MERGE', 'ARCHIVE']), path: z.string().min(1), targetPath: z.string().min(1), writePath: z.string().min(1).optional(), source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), revision: RevisionSchema }).strict();
+const PendingSchema = z.object({ action: z.enum(['MERGE', 'ARCHIVE']), path: z.string().min(1), targetPath: z.string().min(1), writePath: z.string().min(1).optional(), source: z.array(z.string().min(1)).min(1), beforeHash: z.string().regex(/^[a-f0-9]{64}$/i), targetBeforeHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), archiveHash: z.string().regex(/^[a-f0-9]{64}$/i), afterHash: z.string().regex(/^[a-f0-9]{64}$/i), afterRaw: z.string().min(1), archiveRaw: z.string().min(1), revision: RevisionSchema }).strict();
 const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative()).default({}), pendingMutation: PendingSchema.optional() }).passthrough();
 type State = z.infer<typeof StateSchema>;
 
@@ -88,15 +88,17 @@ export class MemoryService {
       const target = await this.reader.read(proposal.targetPath);
       const mergedSources = [...new Set([...current.metadata.sources, ...target.metadata.sources, ...source])];
       const raw = renderMemoryDocument(MemoryMetadataSchema.parse({ category: target.metadata.category, summary: proposal.summary, importance: proposal.importance ?? target.metadata.importance, frequency: proposal.frequency ?? target.metadata.frequency, sources: mergedSources, createdAt: target.metadata.createdAt ?? this.clock(), updatedAt: this.clock() }), proposal.content);
+      const archiveRaw = this.archiveRaw(current);
       const revision = this.makeRevision('MERGE', proposal.targetPath, source, target.raw, raw);
-      await this.persistPending({ action: 'MERGE', path: proposal.path, writePath: proposal.targetPath, targetPath: `archive/${proposal.path.split('/').at(-1)}`, source, beforeHash: hash(target.raw), archiveHash: hash(current.raw), afterHash: hash(raw), afterRaw: raw, revision });
+      await this.persistPending({ action: 'MERGE', path: proposal.path, writePath: proposal.targetPath, targetPath: `archive/${proposal.path.split('/').at(-1)}`, source, beforeHash: hash(current.raw), targetBeforeHash: hash(target.raw), archiveHash: hash(archiveRaw), afterHash: hash(raw), afterRaw: raw, archiveRaw, revision });
       await this.completePending();
       return { accepted: true, action: 'MERGE', path: proposal.targetPath, revision, trace: { result: 'applied' } };
     }
     if (proposal.path.startsWith('archive/')) throw new Error('Memory is already archived');
     const archivedPath = `archive/${proposal.path.split('/').at(-1)}`;
-    const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, current.raw);
-    await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, source, beforeHash: current.hash, archiveHash: current.hash, afterHash: current.hash, afterRaw: current.raw, revision });
+    const archiveRaw = this.archiveRaw(current);
+    const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, archiveRaw);
+    await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, source, beforeHash: current.hash, archiveHash: hash(archiveRaw), afterHash: hash(archiveRaw), afterRaw: archiveRaw, archiveRaw, revision });
     await this.completePending();
     return { accepted: true, action: 'ARCHIVE', path: proposal.path, revision, trace: { result: 'applied' } };
   }
@@ -128,24 +130,30 @@ export class MemoryService {
   private async completePending(): Promise<void> {
     const state = await this.readState(); const pending = state.pendingMutation; if (!pending) return;
     const sourcePath = pathForMemory(this.paths, pending.path); const targetPath = pathForMemory(this.paths, pending.targetPath); const writePath = pending.writePath ?? pending.targetPath;
+    const sourceExistsBefore = await this.exists(pending.path);
+    if (sourceExistsBefore && (await this.reader.read(pending.path)).hash !== pending.beforeHash) throw new Error('Pending mutation source changed');
     if (pending.action === 'MERGE') {
       const targetExists = await this.exists(writePath);
       if (!targetExists || (await this.reader.read(writePath)).hash !== pending.afterHash) await this.writeRaw(writePath, pending.afterRaw);
     }
-    const sourceExists = await this.exists(pending.path); const targetExists = await this.exists(pending.targetPath);
+    const sourceExists = await this.exists(pending.path); const targetExists = await this.fileExists(pending.targetPath);
     if (sourceExists && !targetExists) { await mkdir(dirname(targetPath), { recursive: true }); await rename(sourcePath, targetPath); }
-    else if (sourceExists && targetExists) { if ((await this.reader.read(pending.targetPath)).hash === pending.archiveHash && (pending.action === 'ARCHIVE' || (await this.reader.read(writePath)).hash === pending.afterHash)) await rm(sourcePath, { force: true }); else throw new Error('Pending mutation target conflict'); }
+    else if (sourceExists && targetExists) { if ((await this.rawHashAt(targetPath)) === pending.archiveHash && (pending.action === 'ARCHIVE' || (await this.reader.read(writePath)).hash === pending.afterHash)) await rm(sourcePath, { force: true }); else throw new Error('Pending mutation target conflict'); }
     else if (!sourceExists && !targetExists) throw new Error('Pending mutation lost both source and target');
+    if ((await this.rawHashAt(targetPath)) !== pending.archiveHash) await this.writeRaw(pending.targetPath, pending.archiveRaw);
     const revisions = await readJsonl(this.paths.revisions, RevisionSchema);
     if (!revisions.records.some((revision) => revision.revisionId === pending.revision.revisionId)) await appendJsonl(this.paths.revisions, pending.revision);
     await this.rebuildProjections();
     delete state.pendingMutation; await writeJsonAtomic(this.paths.state, state);
   }
   private async writeRaw(path: string, raw: string): Promise<void> { const target = pathForMemory(this.paths, path); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${process.pid}.${Date.now()}.tmp`; try { await writeFile(temporary, raw, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
+  private async fileExists(path: string): Promise<boolean> { try { await readFile(pathForMemory(this.paths, path)); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
+  private async rawHashAt(path: string): Promise<string> { return hash(await readFile(path)); }
   private async rebuildProjections(): Promise<void> { const documents = await this.reader.list(); await this.writeProjection(this.paths.index, renderIndex(documents)); await this.writeProjection(this.paths.profile, renderProfile(documents)); }
+  private archiveRaw(document: Awaited<ReturnType<MemoryReader['read']>>): string { return renderMemoryDocument(MemoryMetadataSchema.parse({ ...document.metadata, category: 'archive' }), document.content); }
   private async writeProjection(path: string, value: string): Promise<void> { await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.${Date.now()}.tmp`; try { await writeFile(temporary, value, { encoding: 'utf8', flag: 'wx' }); await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
 }
 
 export interface ExplicitMemoryInput { path?: string; summary: string; content: string; sourceEvidence?: string[]; importance?: 'low' | 'normal' | 'high'; frequency?: 'low' | 'normal' | 'high'; expectedHash?: string; }
-function hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+function hash(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
 function slugify(value: string): string { return value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'explicit-memory'; }

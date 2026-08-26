@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,7 @@ describe('reviewed memory invariants', () => {
     await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/important.md', summary: 'Important only', content: 'no', sourceEvidence: ['i'], frequency: 'normal', importance: 'high' }));
     expect(await service.readProfile()).toContain('High frequency');
     expect(await service.readProfile()).not.toContain('Important only');
+    expect(await service.readProfile()).not.toContain('high-importance');
   });
 
   it('derives sourceRefs from consumed events and serializes concurrent consumes', async () => {
@@ -41,6 +42,7 @@ describe('reviewed memory invariants', () => {
   it('archives by atomic move while preserving original semantic document', async () => {
     const workspace = await root();
     const service = new MemoryService({ workspace });
+    await mkdir(service.paths.categories.preferences, { recursive: true });
     const created = await service.apply(ProposalSchema.parse({ action: 'CREATE', path: 'preferences/a.md', summary: 'Keep this', content: 'original body', sourceEvidence: ['evidence'], frequency: 'high' }));
     const result = await service.apply(ProposalSchema.parse({ action: 'ARCHIVE', path: 'preferences/a.md', sourceEvidence: ['archive-reason'], expectedHash: created.revision!.afterHash, reason: 'temporary' }));
     expect(result.accepted).toBe(true);
@@ -56,5 +58,13 @@ describe('reviewed memory invariants', () => {
     const exported = await import('../src/index.js');
     expect('buildIndex' in exported).toBe(false);
     expect('buildProfile' in exported).toBe(false);
+  });
+
+  it('rejects a document whose metadata category disagrees with its directory', async () => {
+    const workspace = await root();
+    const service = new MemoryService({ workspace });
+    await mkdir(service.paths.categories.preferences, { recursive: true });
+    await writeFile(service.paths.categories.preferences + '/wrong.md', '<!-- personal-memory:v1 {"category":"archive","summary":"Wrong","importance":"normal","frequency":"normal","sources":["h"]} -->\n\nbody\n');
+    await expect(service.read('preferences/wrong.md')).rejects.toThrow(/category/i);
   });
 });

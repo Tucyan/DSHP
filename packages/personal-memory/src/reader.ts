@@ -57,6 +57,7 @@ export class MemoryReader {
     const path = pathForMemory(this.paths, memoryPath);
     const raw = await readFile(path, 'utf8');
     const parsed = parseMemoryDocument(raw);
+    if (parsed.metadata.category !== memoryPath.split('/')[0]) throw new Error('Memory metadata category mismatch');
     return { path: memoryPath, ...parsed, raw, hash: await hashText(raw) };
   }
 
