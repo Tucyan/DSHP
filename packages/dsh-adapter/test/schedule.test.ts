@@ -91,6 +91,26 @@ describe('DSH schedule adapter', () => {
     await expect(live.create(req, 'ambiguous')).rejects.toThrow(/failed/i);
     expect(JSON.parse(await readFile(statePath, 'utf8'))[0].status).toBe('pending');
   });
+  it('never deletes a pending reservation and surfaces it beside live rows', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-pending-list-'));
+    const statePath = path.join(dir, 'schedule.json');
+    const tool = { create: async () => { throw new Error('unknown'); }, list: async () => [], delete: async (id: string) => { throw new Error(`must not delete ${id}`); } };
+    const live = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(live.create(req, 'pending-key')).rejects.toThrow();
+    const listed = await live.list();
+    expect(listed).toEqual([expect.objectContaining({ id: 'pending-pending-key', status: 'pending' })]);
+    await expect(live.delete('pending-pending-key')).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
+    expect(JSON.parse(await readFile(statePath, 'utf8'))[0].status).toBe('pending');
+  });
+  it('keeps the pending reservation when an invalid remote id cannot be committed', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-invalid-id-'));
+    const statePath = path.join(dir, 'schedule.json');
+    const tool = { create: async () => ({ id: '' }), delete: async () => true };
+    const live = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(live.create(req, 'invalid-remote')).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
+    expect(JSON.parse(await readFile(statePath, 'utf8'))[0]).toEqual(expect.objectContaining({ id: 'pending-invalid-remote', status: 'pending' }));
+    expect(await live.list()).toEqual([expect.objectContaining({ id: 'pending-invalid-remote', status: 'pending' })]);
+  });
   it('binds schedules to a session and has no filesystem side effect by default', async () => {
     const schedule = new FakeDshSchedule();
     await schedule.create(req);

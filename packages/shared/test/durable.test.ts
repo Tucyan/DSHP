@@ -1,0 +1,34 @@
+import { describe, expect, it } from 'vitest';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { z } from 'zod';
+import { durableJsonTransaction } from '../src/durable.js';
+
+const schema = z.object({ id: z.string().min(1) }).strict();
+
+describe('durable JSON transactions', () => {
+  it('validates remote-derived final state before writing and keeps memory rollback-safe', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-final-'));
+    const statePath = path.join(root, 'state.json');
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'initial' }, (state) => { state.id = ''; })).rejects.toThrow();
+    await expect(readFile(statePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'initial' }, (state) => { state.id = 'committed'; })).resolves.toMatchObject({ state: { id: 'committed' } });
+    expect(JSON.parse(await readFile(statePath, 'utf8'))).toEqual({ id: 'committed' });
+  });
+
+  it('recovers a lock left by a clearly dead owner after the grace period', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-stale-'));
+    const statePath = path.join(root, 'state.json');
+    const lockPath = `${statePath}.lock`;
+    await writeFile(lockPath, JSON.stringify({ token: '00000000-0000-4000-8000-000000000001', pid: 2147483647, createdAt: '2000-01-01T00:00:00.000Z' }));
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'recovered' }, (state) => state.id)).resolves.toMatchObject({ state: { id: 'recovered' } });
+  });
+
+  it('fails closed when lock ownership metadata is malformed', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-malformed-'));
+    const statePath = path.join(root, 'state.json');
+    await writeFile(`${statePath}.lock`, 'not-json');
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'blocked' }, (state) => state)).rejects.toThrow(/owner metadata/i);
+  });
+});

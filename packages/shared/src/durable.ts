@@ -1,9 +1,14 @@
-import fs from 'node:fs/promises';
+import fs, { type FileHandle } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { writeJsonAtomic } from './storage.js';
 import { z } from 'zod';
 
 export const DEFAULT_DURABLE_LOCK_TIMEOUT_MS = 30_000;
+const LOCK_GRACE_MS = 30_000;
+export const DurableLockOwnerSchema = z.object({ token: z.string().uuid(), pid: z.number().int().positive(), createdAt: z.string().datetime() }).strict();
+export type DurableLockOwner = z.infer<typeof DurableLockOwnerSchema>;
 
 async function nearestRealPath(value: string): Promise<string> {
   let current = value;
@@ -31,32 +36,87 @@ async function assertSafeTarget(filePath: string, runtimeRoot: string): Promise<
   }
 }
 
+async function removeIfOwnerMatches(lockPath: string, token: string): Promise<boolean> {
+  const tombstone = `${lockPath}.${token}.tombstone`;
+  try { await fs.rename(lockPath, tombstone); }
+  catch (error) { if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return true; throw error; }
+  let owner: DurableLockOwner;
+  try { owner = DurableLockOwnerSchema.parse(JSON.parse(await fs.readFile(tombstone, 'utf8'))); }
+  catch {
+    // Never discard a lock whose ownership cannot be proven. Restore it only
+    // when the canonical name is still free.
+    try { await fs.rename(tombstone, lockPath); } catch { /* leave tombstone for manual recovery */ }
+    return false;
+  }
+  if (owner.token === token) { await fs.unlink(tombstone).catch(() => undefined); return true; }
+  try { await fs.rename(tombstone, lockPath); } catch { /* leave replacement/tombstone untouched */ }
+  return false;
+}
+
 async function withLock<T>(lockPath: string, timeoutMs: number, operation: () => Promise<T>): Promise<T> {
   const deadline = Date.now() + timeoutMs;
+  const token = crypto.randomUUID();
   while (true) {
-    try { await fs.mkdir(lockPath); break; }
+    try {
+      const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+      let handle: FileHandle;
+      try { handle = await fs.open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow, 0o600); }
+      catch (openError) {
+        if (noFollow && openError && typeof openError === 'object' && 'code' in openError && openError.code === 'EINVAL') handle = await fs.open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+        else throw openError;
+      }
+      try { await handle.writeFile(`${JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })}\n`, 'utf8'); await handle.sync(); }
+      finally { await handle.close(); }
+      break;
+    }
     catch (error) {
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST' || Date.now() >= deadline) throw new Error('durable lock timeout', { cause: error });
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') throw new Error('durable lock acquisition failed', { cause: error });
+      let owner: DurableLockOwner | undefined;
+      const transientDeadline = Math.min(deadline, Date.now() + 250);
+      while (!owner) {
+        let raw: string;
+        try { raw = await fs.readFile(lockPath, 'utf8'); }
+        catch (ownerError) {
+          if (ownerError && typeof ownerError === 'object' && 'code' in ownerError && ownerError.code === 'ENOENT' && Date.now() < transientDeadline) { await new Promise((resolve) => setTimeout(resolve, 10)); continue; }
+          throw new Error('durable lock owner metadata is unavailable', { cause: ownerError });
+        }
+        const trimmed = raw.trim();
+        if ((!trimmed || (trimmed.startsWith('{') && !trimmed.endsWith('}'))) && Date.now() < transientDeadline) { await new Promise((resolve) => setTimeout(resolve, 10)); continue; }
+        try { owner = DurableLockOwnerSchema.parse(JSON.parse(raw)); }
+        catch (ownerError) { throw new Error('durable lock owner metadata is malformed or incomplete', { cause: ownerError }); }
+      }
+      if (Date.now() - Date.parse(owner.createdAt) >= LOCK_GRACE_MS) {
+        try { process.kill(owner.pid, 0); } catch (probe) {
+          if (probe && typeof probe === 'object' && 'code' in probe && probe.code === 'ESRCH') { await removeIfOwnerMatches(lockPath, owner.token); continue; }
+        }
+      }
+      if (Date.now() >= deadline) throw new Error('durable lock timeout', { cause: error });
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  try { return await operation(); } finally { await fs.rm(lockPath, { recursive: true, force: true }); }
+  try { return await operation(); } finally {
+    await removeIfOwnerMatches(lockPath, token);
+  }
 }
 
 export async function durableJsonTransaction<T, R>(statePath: string, runtimeRoot: string, schema: z.ZodType<T>, initial: T, mutate: (state: T) => Promise<R> | R, lockTimeoutMs = DEFAULT_DURABLE_LOCK_TIMEOUT_MS): Promise<{ result: R; state: T }> {
   if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs < 30_000) throw new Error('durable lock timeout must be at least 30000ms');
-  const target = path.resolve(statePath); await assertSafeTarget(target, runtimeRoot); await fs.mkdir(path.dirname(target), { recursive: true }); await assertSafeTarget(target, runtimeRoot);
-  return withLock(`${target}.lock`, lockTimeoutMs, async () => {
+  const target = path.resolve(statePath); const lockPath = `${target}.lock`; await assertSafeTarget(target, runtimeRoot); await assertSafeTarget(lockPath, runtimeRoot); await fs.mkdir(path.dirname(target), { recursive: true }); await assertSafeTarget(target, runtimeRoot); await assertSafeTarget(lockPath, runtimeRoot);
+  return withLock(lockPath, lockTimeoutMs, async () => {
     await assertSafeTarget(target, runtimeRoot);
     let current: T;
     try { current = schema.parse(JSON.parse(await fs.readFile(target, 'utf8'))); }
     catch (error) { if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') current = schema.parse(initial); else throw error; }
     const cloned = schema.parse(JSON.parse(JSON.stringify(current)));
     const result = await mutate(cloned);
+    // Mutators may have received data from a remote adapter.  Validate the
+    // complete post-mutation value before it can reach disk (or the caller's
+    // in-memory state).
+    const finalState = schema.parse(JSON.parse(JSON.stringify(cloned)));
     await assertSafeTarget(target, runtimeRoot);
-    await writeJsonAtomic(target, cloned);
+    await writeJsonAtomic(target, finalState);
     await assertSafeTarget(target, runtimeRoot);
-    return { result, state: cloned };
+    return { result, state: finalState };
   });
 }
 

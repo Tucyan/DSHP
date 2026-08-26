@@ -71,7 +71,7 @@ export class DshSchedule implements DshSchedulePort {
     return new DshSchedule(statePath, snapshot, runtimeRoot);
   }
   recover(now: string): Promise<ScheduleBinding[]> { return this.mutate(async (schedule) => schedule.due(now)).catch((error: unknown) => { throw normalizedScheduleError('schedule recovery', error); }); }
-  private mutate<T>(fn: (schedule: FakeDshSchedule) => Promise<T>): Promise<T> { const result = this.writeQueue.then(async () => { if (!this.statePath) { const value = await fn(this.fake); return value; } const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, [], async (state) => { const working = new FakeDshSchedule(state); const value = await fn(working); state.splice(0, state.length, ...working.snapshot()); this.fake = working; return value; }); return transaction.result; }); this.writeQueue = result.then(() => undefined, () => undefined); return result; }
+  private mutate<T>(fn: (schedule: FakeDshSchedule) => Promise<T>): Promise<T> { const result = this.writeQueue.then(async () => { if (!this.statePath) { const value = await fn(this.fake); return value; } const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, [], async (state) => { const working = new FakeDshSchedule(state); const value = await fn(working); state.splice(0, state.length, ...working.snapshot()); return value; }); this.fake = new FakeDshSchedule(transaction.state); return transaction.result; }); this.writeQueue = result.then(() => undefined, () => undefined); return result; }
   create(request: ScheduleRequest, idempotencyKey?: string) { return this.mutate((schedule) => schedule.create(request, idempotencyKey)).catch((error: unknown) => { throw normalizedScheduleError('schedule create', error); }); }
   async list(sessionId?: string) { try { if (this.statePath) this.fake = new FakeDshSchedule(await durableJsonRead(this.statePath, this.runtimeRoot, StateSchema, [])); return this.fake.list(sessionId); } catch (error) { throw normalizedScheduleError('schedule list', error); } }
   delete(id: string) { return this.mutate((schedule) => schedule.delete(id)).catch((error: unknown) => { throw normalizedScheduleError('schedule delete', error); }); }
@@ -97,7 +97,7 @@ export class LiveDshSchedule implements DshSchedulePort {
     const snapshot = await durableJsonRead(statePath, runtimeRoot, StateSchema, []);
     return new LiveDshSchedule(tool, sessionId, statePath, snapshot, runtimeRoot);
   }
-  private mutate<T>(fn: (bindings: Map<string, ScheduleBinding>) => Promise<T>): Promise<T> { const result = this.writeQueue.then(async () => { if (!this.statePath) return fn(this.bindings); const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, [], async (state) => { const working = new Map(state.map((binding) => [binding.id, binding])); const value = await fn(working); state.splice(0, state.length, ...working.values()); this.bindings = working; return value; }); return transaction.result; }); this.writeQueue = result.then(() => undefined, () => undefined); return result; }
+  private mutate<T>(fn: (bindings: Map<string, ScheduleBinding>) => Promise<T>): Promise<T> { const result = this.writeQueue.then(async () => { if (!this.statePath) return fn(this.bindings); const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, [], async (state) => { const working = new Map(state.map((binding) => [binding.id, binding])); const value = await fn(working); state.splice(0, state.length, ...working.values()); return value; }); this.bindings = new Map(transaction.state.map((binding) => [binding.id, binding])); return transaction.result; }); this.writeQueue = result.then(() => undefined, () => undefined); return result; }
   async create(request: ScheduleRequest, idempotencyKey = ''): Promise<ScheduleBinding> {
     const parsed = RequestSchema.safeParse(request);
     if (!parsed.success) throw new ScheduleAdapterError('INVALID_SCHEDULE', parsed.error.message);
@@ -118,7 +118,7 @@ export class LiveDshSchedule implements DshSchedulePort {
         let remote: { id: string };
         try { remote = await this.tool.create({ sessionId: parsed.data.sessionId, prompt: parsed.data.prompt, at: parsed.data.at, everySeconds: parsed.data.everySeconds }); }
         catch (error) { throw normalizedScheduleError('live schedule create', error); }
-        try { return await this.mutate(async (bindings) => { bindings.delete(pending.id); const binding: ScheduleBinding = { ...parsed.data, id: remote.id, idempotencyKey: key, status: 'scheduled', createdAt: pending.createdAt }; bindings.set(binding.id, binding); return binding; }); }
+        try { return await this.mutate(async (bindings) => { const current = bindings.get(pending.id); if (!current || current.status !== 'pending' || current.idempotencyKey !== key) throw new ScheduleAdapterError('ADAPTER_FAILURE', 'schedule creation reservation changed before reconciliation'); bindings.delete(pending.id); const binding: ScheduleBinding = { ...parsed.data, id: remote.id, idempotencyKey: key, status: 'scheduled', createdAt: pending.createdAt }; bindings.set(binding.id, binding); return binding; }); }
         catch (error) { throw normalizedScheduleError('live schedule create', error); }
       }
       return { ...pending };
@@ -137,11 +137,16 @@ export class LiveDshSchedule implements DshSchedulePort {
   async list(sessionId = this.sessionId): Promise<ScheduleBinding[]> {
     if (sessionId !== this.sessionId) return [];
     try {
-      const result = this.tool.list ? await this.tool.list(sessionId) : this.statePath ? await durableJsonRead(this.statePath, this.runtimeRoot, StateSchema, []) : [...this.bindings.values()];
+      const local = this.statePath ? await durableJsonRead(this.statePath, this.runtimeRoot, StateSchema, []) : [...this.bindings.values()];
+      const result = this.tool.list ? await this.tool.list(sessionId) : local;
       const parsed = StateSchema.safeParse(result);
       if (!parsed.success) throw new ScheduleAdapterError('ADAPTER_FAILURE', 'live schedule list returned invalid bindings');
       if (parsed.data.some((binding) => binding.sessionId !== this.sessionId)) throw new ScheduleAdapterError('SESSION_OWNERSHIP', 'live schedule list returned a foreign session binding');
-      return parsed.data.map((binding) => ({ ...binding }));
+      const remote = parsed.data.map((binding) => ({ ...binding }));
+      // A local pending reservation represents an uncertain remote operation;
+      // never hide it merely because the live tool can list its own rows.
+      const pending = this.tool.list ? local.filter((binding) => binding.sessionId === this.sessionId && binding.status === 'pending') : [];
+      return [...remote, ...pending].map((binding) => ({ ...binding }));
     } catch (error) { throw normalizedScheduleError('live schedule list', error); }
   }
   async recover(now: string): Promise<ScheduleBinding[]> {
@@ -155,6 +160,7 @@ export class LiveDshSchedule implements DshSchedulePort {
       const binding = bindings.get(id);
       if (!binding) return false;
       if (binding.sessionId !== this.sessionId) throw new ScheduleAdapterError('SESSION_OWNERSHIP', 'schedule belongs to another session');
+      if (binding.status === 'pending') throw new ScheduleAdapterError('ADAPTER_FAILURE', 'pending schedule deletion is outcome-uncertain; reconcile it before deleting');
       const result = await this.tool.delete(id);
       if (result === false) return false;
       bindings.delete(id); return true;

@@ -5,15 +5,15 @@ if (-not $PeerId -or $PeerId -match '[\x00-\x1F\x7F]' -or $PeerId.Contains(':') 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $env:PGA_REPO_ROOT = $repo
 $config = (& node (Join-Path $PSScriptRoot 'runtime-config.mjs') --json | ConvertFrom-Json)
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'init-runtime.ps1')
-if ($LASTEXITCODE -ne 0) { throw "Isolated runtime initialization failed with exit code $LASTEXITCODE" }
-$env:DSH_HOME = $config.dshHome
-$env:DSH_AGENTS_HOME = $config.agentsHome
 Push-Location $repo
 try {
   & corepack pnpm@11.7.0 build
   if ($LASTEXITCODE -ne 0) { throw "Project build failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'init-runtime.ps1')
+if ($LASTEXITCODE -ne 0) { throw "Isolated runtime initialization failed with exit code $LASTEXITCODE" }
+$env:DSH_HOME = $config.dshHome
+$env:DSH_AGENTS_HOME = $config.agentsHome
 $profilePatch = Join-Path $config.dshHome 'profiles/web/cordis.patch.yml'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profilePatch) | Out-Null
 $patchText = (& node (Join-Path $PSScriptRoot 'render-qq-profile.mjs') --peer-id $PeerId | Out-String).TrimEnd()

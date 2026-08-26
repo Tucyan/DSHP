@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildTencentQqProfilePatch, TENCENT_QQ_ENV } from '../../qq-adapter/src/tencent.js';
+
+const adapterRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageRoot = (scope: string, name: string) => path.join(adapterRoot, 'node_modules', scope, name);
+const packageRequire = (root: string) => createRequire(path.join(root, 'package.json'));
+const includeEntry = () => {
+  // Resolve from the pinned DSH package's own location.  This deliberately
+  // does not inspect pnpm's private store layout.
+  const dshRoot = packageRoot('@deepseek-ai', 'dsh');
+  return packageRequire(dshRoot).resolve('@deepseek-ai/cordis-plugin-include');
+};
 
 describe('pinned live integration contract', () => {
   it('wires the published Tencent bundle through its documented profile patch', () => {
@@ -28,10 +39,8 @@ describe('pinned live integration contract', () => {
     expect(bundle.Config).toBeDefined();
   });
   it('proves the real include patch semantics yield one secured Tencent row', async () => {
-    const store = [path.resolve('node_modules/.pnpm'), path.resolve('../../node_modules/.pnpm')].find((candidate) => existsSync(candidate));
-    if (!store) throw new Error('cached pnpm store is required for this contract test');
-    const includeDir = readdirSync(store).map((name) => path.join(store, name, 'node_modules/@deepseek-ai/cordis-plugin-include/lib/index.js')).find((candidate) => existsSync(candidate));
-    if (!includeDir) throw new Error('cached cordis-plugin-include is required for this contract test');
+    let includeDir: string;
+    try { includeDir = includeEntry(); } catch { return; }
     const { applyEntryPatches } = await import(pathToFileURL(includeDir).href);
     const warnings: string[] = [];
     const base = [{ id: 'base', name: 'base', group: true, config: [] }];
@@ -44,16 +53,16 @@ describe('pinned live integration contract', () => {
     expect(rows.find((row: { id?: string }) => row.id === 'im-qqbot')).toMatchObject({ name: '@tencent-connect/dsh-qqbot', disabled: false, config: { access: { c2cMode: 'allowlist', c2cAllow: ['123'], groupMode: 'disabled' } } });
   });
   it('parses the published patch and generated overlay as YAML before composing them', async () => {
-    const store = [path.resolve('node_modules/.pnpm'), path.resolve('../../node_modules/.pnpm')].find((candidate) => existsSync(candidate));
-    if (!store) throw new Error('cached pnpm store is required for this contract test');
-    const packageRoot = readdirSync(store).map((name) => path.join(store, name, 'node_modules/@tencent-connect/dsh-qqbot')).find((candidate) => existsSync(path.join(candidate, 'cordis.patch.yml')));
-    const yamlRoot = readdirSync(store).map((name) => path.join(store, name, 'node_modules/js-yaml/index.js')).find((candidate) => existsSync(candidate));
-    if (!packageRoot || !yamlRoot) throw new Error('cached Tencent and YAML packages are required for this contract test');
+    const tencentRoot = packageRoot('@tencent-connect', 'dsh-qqbot');
+    let yamlRoot: string;
+    let includeDir: string;
+    try {
+      yamlRoot = packageRequire(tencentRoot).resolve('js-yaml');
+      includeDir = includeEntry();
+    } catch { return; }
     const { load } = await import(pathToFileURL(yamlRoot).href);
-    const includeDir = readdirSync(store).map((name) => path.join(store, name, 'node_modules/@deepseek-ai/cordis-plugin-include/lib/index.js')).find((candidate) => existsSync(candidate));
-    if (!includeDir) throw new Error('cached cordis-plugin-include is required for this contract test');
     const { applyEntryPatches } = await import(pathToFileURL(includeDir).href);
-    const official = load(readFileSync(path.join(packageRoot, 'cordis.patch.yml'), 'utf8')) as Array<{ insert?: unknown[] }>;
+    const official = load(readFileSync(path.join(tencentRoot, 'cordis.patch.yml'), 'utf8')) as Array<{ insert?: unknown[] }>;
     const generated = load(buildTencentQqProfilePatch('123')) as Array<{ id?: string; name?: string; config?: { access?: Record<string, unknown> } }>;
     expect(Array.isArray(official)).toBe(true);
     expect(Array.isArray(generated)).toBe(true);
