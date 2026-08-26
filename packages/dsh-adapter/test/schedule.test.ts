@@ -83,6 +83,14 @@ describe('DSH schedule adapter', () => {
     await Promise.all([first.create(req, 'one'), second.create({ ...req, prompt: 'two' }, 'two')]);
     expect(await LiveDshSchedule.open(tool, 'qq:123', statePath, dir).then((schedule) => schedule.list())).toHaveLength(2);
   });
+  it('leaves a durable pending marker when remote creation is ambiguous', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-pending-'));
+    const statePath = path.join(dir, 'schedule.json');
+    const tool = { create: async () => { throw new Error('remote outcome unknown'); }, delete: async () => true };
+    const live = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(live.create(req, 'ambiguous')).rejects.toThrow(/failed/i);
+    expect(JSON.parse(await readFile(statePath, 'utf8'))[0].status).toBe('pending');
+  });
   it('binds schedules to a session and has no filesystem side effect by default', async () => {
     const schedule = new FakeDshSchedule();
     await schedule.create(req);

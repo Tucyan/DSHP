@@ -12,7 +12,7 @@ const RequestSchema = z.object({
 });
 
 export type ScheduleRequest = z.infer<typeof RequestSchema>;
-export interface ScheduleBinding extends ScheduleRequest { id: string; idempotencyKey: string; status: 'scheduled' | 'overdue'; createdAt: string; }
+export interface ScheduleBinding extends ScheduleRequest { id: string; idempotencyKey: string; status: 'scheduled' | 'overdue' | 'pending'; createdAt: string; }
 export interface DshSchedulePort {
   create(request: ScheduleRequest, idempotencyKey?: string): Promise<ScheduleBinding>;
   list(sessionId?: string): Promise<ScheduleBinding[]>;
@@ -26,7 +26,7 @@ function normalizedScheduleError(operation: string, error: unknown): ScheduleAda
   return new ScheduleAdapterError('ADAPTER_FAILURE', `${operation} failed`);
 }
 const TimestampSchema = z.string().datetime().refine((value) => { const epoch = Date.parse(value); return Number.isFinite(epoch) && epoch >= Date.UTC(2000, 0, 1) && epoch <= Date.UTC(2100, 0, 1); }, 'timestamp is outside supported range');
-const StateSchema = z.array(z.object({ id: z.string().min(1), sessionId: z.string().min(1), prompt: z.string().min(1), kind: z.enum(['once', 'interval']), at: TimestampSchema, everySeconds: z.number().int().min(300).optional(), idempotencyKey: z.string().min(1), status: z.enum(['scheduled', 'overdue']), createdAt: TimestampSchema }).strict());
+const StateSchema = z.array(z.object({ id: z.string().min(1), sessionId: z.string().min(1), prompt: z.string().min(1), kind: z.enum(['once', 'interval']), at: TimestampSchema, everySeconds: z.number().int().min(300).optional(), idempotencyKey: z.string().min(1), status: z.enum(['scheduled', 'overdue', 'pending']), createdAt: TimestampSchema }).strict());
 const NowSchema = TimestampSchema;
 type State = z.infer<typeof StateSchema>;
 const idFor = (key: string, request: ScheduleRequest) => crypto.createHash('sha256').update(`${key}\0${JSON.stringify(request)}`).digest('hex').slice(0, 24);
@@ -103,6 +103,26 @@ export class LiveDshSchedule implements DshSchedulePort {
     if (!parsed.success) throw new ScheduleAdapterError('INVALID_SCHEDULE', parsed.error.message);
     if (parsed.data.sessionId !== this.sessionId) throw new ScheduleAdapterError('INVALID_SCHEDULE', 'schedule session binding mismatch');
     const key = idempotencyKey || idFor('', parsed.data);
+    if (this.statePath) {
+      const pending = await this.mutate(async (bindings) => {
+        const existing = [...bindings.values()].find((binding) => binding.idempotencyKey === key);
+        if (existing) {
+          if (existing.status === 'pending') throw new ScheduleAdapterError('ADAPTER_FAILURE', 'schedule creation outcome is uncertain');
+          if (existing.sessionId !== parsed.data.sessionId || existing.prompt !== parsed.data.prompt || existing.at !== parsed.data.at || existing.kind !== parsed.data.kind || existing.everySeconds !== parsed.data.everySeconds) throw new ScheduleAdapterError('IDEMPOTENCY_CONFLICT', 'schedule idempotency key is already bound to a different request');
+          return existing;
+        }
+        const reservation: ScheduleBinding = { ...parsed.data, id: `pending-${key}`, idempotencyKey: key, status: 'pending', createdAt: new Date().toISOString() };
+        bindings.set(reservation.id, reservation); return reservation;
+      });
+      if (pending.status === 'pending') {
+        let remote: { id: string };
+        try { remote = await this.tool.create({ sessionId: parsed.data.sessionId, prompt: parsed.data.prompt, at: parsed.data.at, everySeconds: parsed.data.everySeconds }); }
+        catch (error) { throw normalizedScheduleError('live schedule create', error); }
+        try { return await this.mutate(async (bindings) => { bindings.delete(pending.id); const binding: ScheduleBinding = { ...parsed.data, id: remote.id, idempotencyKey: key, status: 'scheduled', createdAt: pending.createdAt }; bindings.set(binding.id, binding); return binding; }); }
+        catch (error) { throw normalizedScheduleError('live schedule create', error); }
+      }
+      return { ...pending };
+    }
     return this.mutate(async (bindings) => {
       const existing = [...bindings.values()].find((binding) => binding.idempotencyKey === key);
       if (existing) {
