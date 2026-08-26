@@ -4,6 +4,8 @@
     { "path": "packages/shared" },
     { "path": "packages/agent-core" },
     { "path": "packages/personal-memory" },
-    { "path": "packages/personal-heartbeat" }
+    { "path": "packages/personal-heartbeat" },
+    { "path": "packages/dsh-adapter" },
+    { "path": "packages/qq-adapter" }
   ]
 }
