@@ -1,7 +1,6 @@
 import {
   AgentActionSchema,
   AgentTriggerSchema,
-  redactSecrets,
   type AgentAction,
   type AgentTrigger,
   type TraceRecord,
@@ -104,7 +103,7 @@ export class AgentCore {
       throw error;
     }
 
-    await this.trace(parsedTrigger.data, 'action.accepted', { action });
+    await this.trace(parsedTrigger.data, 'action.accepted', { actionType: action.type });
     await this.execute(action, parsedTrigger.data);
     return action;
   }
@@ -153,8 +152,8 @@ export class AgentCore {
     }
   }
 
-  private async trace(trigger: AgentTrigger, event: string, data: unknown): Promise<void> {
-    await (this.options.trace ?? defaultTrace).write(redactSecrets({ at: trigger.at, event, data }));
+  private async trace(trigger: AgentTrigger, event: string, data: { actionType: string }): Promise<void> {
+    await (this.options.trace ?? defaultTrace).write({ at: trigger.at, event, data });
   }
 
   private async safeTrace(at: string, event: string, data: unknown): Promise<void> {

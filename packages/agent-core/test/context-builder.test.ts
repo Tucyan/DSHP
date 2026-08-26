@@ -67,6 +67,15 @@ describe('ContextBuilder', () => {
     expect((context as unknown as { memories?: string[] }).memories).toBeUndefined();
     expect(Buffer.byteLength(JSON.stringify(context), 'utf8')).toBeLessThanOrEqual(context.byteLength + 64);
     expect(JSON.stringify(context)).not.toContain('P'.repeat(100));
+    const boundedSectionBytes = [
+      context.sections.soul,
+      context.sections.mission,
+      context.sections.profile,
+      ...(context.sections.memories ?? []),
+      context.sections.sessionDelta,
+      context.sections.currentGoal,
+    ].filter((value): value is string => value !== undefined).reduce((total, value) => total + Buffer.byteLength(value, 'utf8'), 0);
+    expect(boundedSectionBytes).toBeLessThanOrEqual(context.byteLength);
   });
 
   it('validates required input, malformed triggers, UTF-8 cuts, exact boundaries, and minimum budgets', () => {

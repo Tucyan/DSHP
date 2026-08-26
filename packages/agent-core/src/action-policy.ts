@@ -9,17 +9,27 @@ import {
 
 export class PolicyViolation extends Error {
   readonly code = 'POLICY_VIOLATION';
-  readonly trigger: unknown;
-  readonly action: unknown;
+  readonly triggerType: string;
+  readonly actionType: string;
 
   constructor(message: string, trigger: unknown, action: unknown) {
     super(message);
     this.name = 'PolicyViolation';
-    this.trigger = trigger;
-    this.action = action;
+    this.triggerType = safeType(trigger, new Set(Object.keys(AgentTriggerActionMatrix)));
+    this.actionType = safeType(action, new Set(Object.values(AgentTriggerActionMatrix).flat()));
   }
 }
 export { AgentTriggerActionMatrix };
+
+function safeType(value: unknown, allowed: ReadonlySet<string>): string {
+  try {
+    if (value === null || typeof value !== 'object') return 'unknown';
+    const candidate = (value as { type?: unknown }).type;
+    return typeof candidate === 'string' && allowed.has(candidate) ? candidate : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 export function assertActionAllowed(trigger: unknown, action: unknown): AgentAction {
   const parsedTrigger = AgentTriggerSchema.safeParse(trigger);

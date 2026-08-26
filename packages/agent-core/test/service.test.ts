@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AgentCore } from '../src/service.js';
+import { PolicyViolation, assertActionAllowed } from '../src/action-policy.js';
 
 const trigger = { type: 'user_message', sessionId: 's', text: 'hi', at: 'now' } as const;
 const contextSource = {
@@ -33,6 +34,38 @@ describe('AgentCore', () => {
     await expect(core.handle(trigger)).resolves.toEqual({ type: 'NOOP', reason: 'not now' });
     expect(traces).toHaveLength(1);
     expect(traces[0]).toMatchObject({ event: 'action.accepted' });
+    expect(traces[0]).toMatchObject({ data: { actionType: 'NOOP' } });
+    expect(traces[0]).not.toHaveProperty('data.action');
+  });
+
+  it('keeps accepted traces to safe action metadata', async () => {
+    const traces: unknown[] = [];
+    const core = new AgentCore({
+      contextSource,
+      model: makeModel({ type: 'RESPOND', text: 'Authorization: Bearer top-secret' }),
+      trace: { write: (record) => traces.push(record) },
+      response: { deliver: async () => undefined },
+    });
+    await core.handle(trigger);
+    const serialized = JSON.stringify(traces[0]);
+    expect(traces[0]).toMatchObject({ event: 'action.accepted', data: { actionType: 'RESPOND' } });
+    expect(traces[0]).not.toHaveProperty('data.action');
+    expect(serialized).not.toContain('Authorization');
+    expect(serialized).not.toContain('top-secret');
+  });
+
+  it('stores only safe trigger/action type metadata on PolicyViolation', () => {
+    let error: unknown;
+    try {
+      assertActionAllowed({ type: 'user_message', sessionId: 's', text: 'hi', at: 'now' }, { type: 'MESSAGE_USER', text: 'ok', importance: 'normal' });
+      throw new Error('expected policy violation');
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(PolicyViolation);
+    expect(error).toMatchObject({ triggerType: 'user_message', actionType: 'MESSAGE_USER' });
+    expect(error).not.toHaveProperty('trigger');
+    expect(error).not.toHaveProperty('action');
   });
 
   it('delivers a response through the response port', async () => {
