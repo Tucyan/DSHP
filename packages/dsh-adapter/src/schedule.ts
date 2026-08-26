@@ -82,6 +82,17 @@ export interface DshLiveScheduleTool {
   list?(sessionId: string): Promise<ScheduleBinding[]>;
   delete(id: string): Promise<boolean | void>;
 }
+export type LiveScheduleCreateOutcome = 'not_created' | 'unknown';
+/** Tool implementations should use `not_created` only when no remote row was created. */
+export class LiveScheduleCreateError extends Error {
+  constructor(readonly outcome: LiveScheduleCreateOutcome, message = `live schedule create outcome: ${outcome}`) { super(message); this.name = 'LiveScheduleCreateError'; }
+}
+export type PendingScheduleResolution =
+  | { outcome: 'not_created' }
+  | { outcome: 'created'; id: string };
+function isProvablyNotCreated(error: unknown): boolean {
+  return error instanceof LiveScheduleCreateError ? error.outcome === 'not_created' : Boolean(error && typeof error === 'object' && (('outcome' in error && error.outcome === 'not_created') || ('code' in error && error.code === 'NOT_CREATED')));
+}
 /** Narrow live boundary; the caller supplies DSH's schedule tool from the active session. */
 export class LiveDshSchedule implements DshSchedulePort {
   private bindings = new Map<string, ScheduleBinding>();
@@ -117,7 +128,14 @@ export class LiveDshSchedule implements DshSchedulePort {
       if (pending.status === 'pending') {
         let remote: { id: string };
         try { remote = await this.tool.create({ sessionId: parsed.data.sessionId, prompt: parsed.data.prompt, at: parsed.data.at, everySeconds: parsed.data.everySeconds }); }
-        catch (error) { throw normalizedScheduleError('live schedule create', error); }
+        catch (error) {
+          if (isProvablyNotCreated(error)) {
+            // Only this explicit contract permits clearing the reservation;
+            // all generic failures remain blocked for manual reconciliation.
+            await this.reconcilePending(key, { outcome: 'not_created' }).catch(() => undefined);
+          }
+          throw normalizedScheduleError('live schedule create', error);
+        }
         try { return await this.mutate(async (bindings) => { const current = bindings.get(pending.id); if (!current || current.status !== 'pending' || current.idempotencyKey !== key) throw new ScheduleAdapterError('ADAPTER_FAILURE', 'schedule creation reservation changed before reconciliation'); bindings.delete(pending.id); const binding: ScheduleBinding = { ...parsed.data, id: remote.id, idempotencyKey: key, status: 'scheduled', createdAt: pending.createdAt }; bindings.set(binding.id, binding); return binding; }); }
         catch (error) { throw normalizedScheduleError('live schedule create', error); }
       }
@@ -154,6 +172,23 @@ export class LiveDshSchedule implements DshSchedulePort {
       NowSchema.parse(now); const overdue = await this.mutate(async (bindings) => { const found = [...bindings.values()].filter((binding) => binding.sessionId === this.sessionId && binding.kind === 'once' && binding.status === 'scheduled' && Date.parse(binding.at) <= Date.parse(now)).map((binding) => ({ ...binding, status: 'overdue' as const })); for (const binding of found) bindings.set(binding.id, binding); return found; });
       return overdue;
     } catch (error) { throw normalizedScheduleError('live schedule recovery', error); }
+  }
+  async reconcilePending(idempotencyKey: string, resolution: PendingScheduleResolution): Promise<ScheduleBinding | null> {
+    if (!idempotencyKey) throw new ScheduleAdapterError('INVALID_SCHEDULE', 'pending schedule key is required');
+    try {
+      return await this.mutate(async (bindings) => {
+        const pending = [...bindings.values()].find((binding) => binding.idempotencyKey === idempotencyKey);
+        if (!pending) throw new ScheduleAdapterError('ADAPTER_FAILURE', 'pending schedule reservation was not found');
+        if (pending.sessionId !== this.sessionId) throw new ScheduleAdapterError('SESSION_OWNERSHIP', 'pending schedule belongs to another session');
+        if (pending.status !== 'pending') throw new ScheduleAdapterError('ADAPTER_FAILURE', 'schedule reservation is already resolved');
+        if (resolution.outcome === 'not_created') { bindings.delete(pending.id); return null; }
+        if (typeof resolution.id !== 'string' || !resolution.id.trim() || resolution.id.startsWith('pending-')) throw new ScheduleAdapterError('INVALID_SCHEDULE', 'reconciled remote schedule id is invalid');
+        const conflicting = bindings.get(resolution.id);
+        if (conflicting && conflicting.idempotencyKey !== idempotencyKey) throw new ScheduleAdapterError('IDEMPOTENCY_CONFLICT', 'reconciled remote schedule id is already bound');
+        const binding: ScheduleBinding = { ...pending, id: resolution.id, status: 'scheduled' };
+        bindings.delete(pending.id); bindings.set(binding.id, binding); return { ...binding };
+      });
+    } catch (error) { throw normalizedScheduleError('live schedule reconciliation', error); }
   }
   async delete(id: string): Promise<boolean> {
     return this.mutate(async (bindings) => {

@@ -31,4 +31,23 @@ describe('durable JSON transactions', () => {
     await writeFile(`${statePath}.lock`, 'not-json');
     await expect(durableJsonTransaction(statePath, root, schema, { id: 'blocked' }, (state) => state)).rejects.toThrow(/owner metadata/i);
   });
+
+  it('cleans the exclusive lock when owner metadata writing fails', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-owner-failure-'));
+    const statePath = path.join(root, 'state.json');
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'blocked' }, () => undefined, 30_000, {
+      ownerWrite: async () => { throw new Error('injected owner write failure'); },
+    })).rejects.toThrow(/owner write failure/i);
+    await expect(readFile(`${statePath}.lock`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'recovered' }, (state) => state.id)).resolves.toMatchObject({ state: { id: 'recovered' } });
+  });
+
+  it('cleans the lock when closing the owner handle fails', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-durable-owner-close-'));
+    const statePath = path.join(root, 'state.json');
+    await expect(durableJsonTransaction(statePath, root, schema, { id: 'blocked' }, () => undefined, 30_000, {
+      ownerClose: async (handle) => { await handle.close(); throw new Error('injected owner close failure'); },
+    })).rejects.toThrow(/owner close failure/i);
+    await expect(readFile(`${statePath}.lock`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

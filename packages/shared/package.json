@@ -12,7 +12,7 @@
     }
   },
   "scripts": {
-    "test": "vitest run packages/shared/test",
+    "test": "vitest run --root ../.. packages/shared/test",
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.json"
   },

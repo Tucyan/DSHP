@@ -9,6 +9,10 @@ export const DEFAULT_DURABLE_LOCK_TIMEOUT_MS = 30_000;
 const LOCK_GRACE_MS = 30_000;
 export const DurableLockOwnerSchema = z.object({ token: z.string().uuid(), pid: z.number().int().positive(), createdAt: z.string().datetime() }).strict();
 export type DurableLockOwner = z.infer<typeof DurableLockOwnerSchema>;
+export interface DurableLockHooks {
+  ownerWrite?: (handle: FileHandle, owner: DurableLockOwner) => Promise<void>;
+  ownerClose?: (handle: FileHandle) => Promise<void>;
+}
 
 async function nearestRealPath(value: string): Promise<string> {
   let current = value;
@@ -53,7 +57,7 @@ async function removeIfOwnerMatches(lockPath: string, token: string): Promise<bo
   return false;
 }
 
-async function withLock<T>(lockPath: string, timeoutMs: number, operation: () => Promise<T>): Promise<T> {
+async function withLock<T>(lockPath: string, timeoutMs: number, operation: () => Promise<T>, hooks: DurableLockHooks = {}): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   const token = crypto.randomUUID();
   while (true) {
@@ -65,12 +69,23 @@ async function withLock<T>(lockPath: string, timeoutMs: number, operation: () =>
         if (noFollow && openError && typeof openError === 'object' && 'code' in openError && openError.code === 'EINVAL') handle = await fs.open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
         else throw openError;
       }
-      try { await handle.writeFile(`${JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })}\n`, 'utf8'); await handle.sync(); }
-      finally { await handle.close(); }
+      const owner = { token, pid: process.pid, createdAt: new Date().toISOString() } satisfies DurableLockOwner;
+      try {
+        if (hooks.ownerWrite) await hooks.ownerWrite(handle, owner);
+        else { await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8'); await handle.sync(); }
+      } catch (ownerError) {
+        // The exclusive handle proves this path was created by this attempt;
+        // remove it while still held so a failed write cannot strand a lock.
+        try { await fs.unlink(lockPath); } catch { await removeIfOwnerMatches(lockPath, token).catch(() => false); }
+        await handle.close().catch(() => undefined);
+        throw ownerError;
+      }
+      try { if (hooks.ownerClose) await hooks.ownerClose(handle); else await handle.close(); }
+      catch (closeError) { await handle.close().catch(() => undefined); await removeIfOwnerMatches(lockPath, token); throw closeError; }
       break;
     }
     catch (error) {
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') throw new Error('durable lock acquisition failed', { cause: error });
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') throw error;
       let owner: DurableLockOwner | undefined;
       const transientDeadline = Math.min(deadline, Date.now() + 250);
       while (!owner) {
@@ -99,7 +114,7 @@ async function withLock<T>(lockPath: string, timeoutMs: number, operation: () =>
   }
 }
 
-export async function durableJsonTransaction<T, R>(statePath: string, runtimeRoot: string, schema: z.ZodType<T>, initial: T, mutate: (state: T) => Promise<R> | R, lockTimeoutMs = DEFAULT_DURABLE_LOCK_TIMEOUT_MS): Promise<{ result: R; state: T }> {
+export async function durableJsonTransaction<T, R>(statePath: string, runtimeRoot: string, schema: z.ZodType<T>, initial: T, mutate: (state: T) => Promise<R> | R, lockTimeoutMs = DEFAULT_DURABLE_LOCK_TIMEOUT_MS, hooks: DurableLockHooks = {}): Promise<{ result: R; state: T }> {
   if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs < 30_000) throw new Error('durable lock timeout must be at least 30000ms');
   const target = path.resolve(statePath); const lockPath = `${target}.lock`; await assertSafeTarget(target, runtimeRoot); await assertSafeTarget(lockPath, runtimeRoot); await fs.mkdir(path.dirname(target), { recursive: true }); await assertSafeTarget(target, runtimeRoot); await assertSafeTarget(lockPath, runtimeRoot);
   return withLock(lockPath, lockTimeoutMs, async () => {
@@ -117,7 +132,7 @@ export async function durableJsonTransaction<T, R>(statePath: string, runtimeRoo
     await writeJsonAtomic(target, finalState);
     await assertSafeTarget(target, runtimeRoot);
     return { result, state: finalState };
-  });
+  }, hooks);
 }
 
 export async function durableJsonRead<T>(statePath: string, runtimeRoot: string, schema: z.ZodType<T>, initial: T): Promise<T> {

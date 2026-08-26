@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DshSchedule, FakeDshSchedule, LiveDshSchedule, type ScheduleRequest } from '../src/schedule.js';
+import { DshSchedule, FakeDshSchedule, LiveDshSchedule, LiveScheduleCreateError, type ScheduleRequest } from '../src/schedule.js';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -110,6 +110,28 @@ describe('DSH schedule adapter', () => {
     await expect(live.create(req, 'invalid-remote')).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
     expect(JSON.parse(await readFile(statePath, 'utf8'))[0]).toEqual(expect.objectContaining({ id: 'pending-invalid-remote', status: 'pending' }));
     expect(await live.list()).toEqual([expect.objectContaining({ id: 'pending-invalid-remote', status: 'pending' })]);
+  });
+  it('allows a same-key retry only after a provable not-created outcome', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-not-created-'));
+    const statePath = path.join(dir, 'schedule.json');
+    let attempts = 0;
+    const tool = { create: async () => { if (++attempts === 1) throw new LiveScheduleCreateError('not_created'); return { id: 'remote-retried' }; }, delete: async () => true };
+    const live = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(live.create(req, 'retryable')).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
+    await expect(live.create(req, 'retryable')).resolves.toMatchObject({ id: 'remote-retried', status: 'scheduled' });
+  });
+  it('requires explicit reconciliation for unknown outcomes and supports both resolutions after restart', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pga-live-reconcile-'));
+    const statePath = path.join(dir, 'schedule.json');
+    const tool = { create: async () => { throw new Error('unknown'); }, delete: async () => true };
+    const live = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(live.create(req, 'manual-remove')).rejects.toThrow();
+    await expect(live.create(req, 'manual-remove')).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
+    await expect(live.reconcilePending('manual-remove', { outcome: 'not_created' })).resolves.toBeNull();
+    await expect(live.create(req, 'manual-created')).rejects.toThrow();
+    const restored = await LiveDshSchedule.open(tool, 'qq:123', statePath, dir);
+    await expect(restored.reconcilePending('manual-created', { outcome: 'created', id: 'remote-confirmed' })).resolves.toMatchObject({ id: 'remote-confirmed', status: 'scheduled' });
+    await expect(restored.reconcilePending('manual-created', { outcome: 'not_created' })).rejects.toMatchObject({ code: 'ADAPTER_FAILURE' });
   });
   it('binds schedules to a session and has no filesystem side effect by default', async () => {
     const schedule = new FakeDshSchedule();
