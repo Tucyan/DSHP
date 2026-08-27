@@ -23,4 +23,11 @@ describe('isolated DSH paths', () => {
     try { await symlink(outside, path.join(root, 'runtime'), 'junction'); } catch { return; }
     await expect(validateIsolatedPathsAsync(resolveIsolatedPaths(root))).rejects.toThrow(/symlink|outside|canonical/i);
   });
+  it('rejects a symlink or junction that points to another internal location', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-paths-internal-'));
+    const runtime = path.join(root, 'runtime'); const target = path.join(runtime, 'inside'); const link = path.join(runtime, 'dsh-home');
+    const { mkdir } = await import('node:fs/promises'); await mkdir(target, { recursive: true });
+    try { await symlink(target, link, 'junction'); } catch { return; }
+    await expect(validateIsolatedPathsAsync(resolveIsolatedPaths(root))).rejects.toThrow(/symlink|junction|canonical/i);
+  });
 });

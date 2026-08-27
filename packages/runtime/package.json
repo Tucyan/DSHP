@@ -1,0 +1,23 @@
+{
+  "name": "@personal-growth/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": {
+    "test": "vitest run --root ../.. packages/runtime/test",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@personal-growth/shared": "workspace:*",
+    "@personal-growth/agent-core": "workspace:*",
+    "@personal-growth/personal-memory": "workspace:*",
+    "@personal-growth/personal-heartbeat": "workspace:*",
+    "@personal-growth/dsh-adapter": "workspace:*",
+    "@personal-growth/qq-adapter": "workspace:*",
+    "zod": "3.25.76"
+  }
+}

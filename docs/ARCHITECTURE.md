@@ -51,10 +51,13 @@ workspace/
     archive/*.md                 archived semantic truth
   data/
     heartbeat-state.json         operational contact/occurrence state
-    qq-binding.json              fixed authorized peer and session binding
     traces.jsonl                 operational trace ledger
-    plugin-proposals/*.md         reviewable extension proposals
+runtime/
+  storage/
+    qq-binding.json              fixed authorized peer and outbound ledger
+    schedules.json               DSH schedule bindings and pending state
   sessions/background/*.jsonl    hidden maintenance records
+  plugin-proposals/*.md          reviewable extension proposals (append-only; pending approval)
 ```
 
 ## Safety invariants

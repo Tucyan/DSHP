@@ -93,6 +93,30 @@ importers:
         specifier: 3.25.76
         version: 3.25.76
 
+  packages/runtime:
+    dependencies:
+      '@personal-growth/agent-core':
+        specifier: workspace:*
+        version: link:../agent-core
+      '@personal-growth/dsh-adapter':
+        specifier: workspace:*
+        version: link:../dsh-adapter
+      '@personal-growth/personal-heartbeat':
+        specifier: workspace:*
+        version: link:../personal-heartbeat
+      '@personal-growth/personal-memory':
+        specifier: workspace:*
+        version: link:../personal-memory
+      '@personal-growth/qq-adapter':
+        specifier: workspace:*
+        version: link:../qq-adapter
+      '@personal-growth/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+
   packages/shared:
     dependencies:
       zod:

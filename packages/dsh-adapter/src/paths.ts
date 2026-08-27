@@ -79,6 +79,17 @@ export async function validateIsolatedPathsAsync(paths: IsolatedPaths): Promise<
   for (const candidate of candidates) {
     const target = normalize(candidate); const ancestor = await nearestRealPath(target); const relative = path.relative(root, ancestor);
     if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) throw new Error('isolated path resolves outside repository');
+    let current = target;
+    const components: string[] = [];
+    while (current !== path.dirname(current) && current.toLowerCase() !== root.toLowerCase()) { components.push(current); current = path.dirname(current); }
+    for (const component of components.reverse()) {
+      try {
+        const canonical = normalize(await fs.realpath(component));
+        if (canonical.toLowerCase() !== component.toLowerCase()) throw new Error('isolated path must not contain a symlink or junction');
+      } catch (error) {
+        if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
+      }
+    }
     try { if ((await fs.lstat(target)).isSymbolicLink()) throw new Error('isolated path must not be a symlink'); } catch (error) {
       if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
     }

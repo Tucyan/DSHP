@@ -6,6 +6,7 @@
     { "path": "packages/personal-memory" },
     { "path": "packages/personal-heartbeat" },
     { "path": "packages/dsh-adapter" },
-    { "path": "packages/qq-adapter" }
+    { "path": "packages/qq-adapter" },
+    { "path": "packages/runtime" }
   ]
 }

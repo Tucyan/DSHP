@@ -27,6 +27,7 @@ export class QqDurableStateStore {
   }
   async complete(key: string): Promise<void> { await this.mutate((state) => { const prior = state.outbound[key]; if (!prior || prior.status !== 'pending') throw new QqDurableStateError('OUTBOUND_STATE', 'outbound completion has no pending reservation'); prior.status = 'sent'; }); }
   async fail(key: string): Promise<void> { await this.mutate((state) => { if (state.outbound[key]?.status === 'pending') delete state.outbound[key]; }); }
+  async reconcile(key: string, outcome: 'sent' | 'not_sent'): Promise<void> { if (outcome === 'sent') return this.complete(key); await this.fail(key); }
   async simulatePending(key: string, occurrenceId: string): Promise<void> { await this.mutate((state) => { state.outbound[key] = { status: 'pending', occurrenceId }; }); }
   private mutate<T>(fn: (state: State) => T): Promise<T> { const result = this.queue.then(async () => { const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, { binding: null, outbound: {} }, fn); this.state = transaction.state; return transaction.result; }); this.queue = result.then(() => undefined, () => undefined); return result; }
 }
