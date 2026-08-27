@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { appendJsonl, durableJsonTransaction, redactTrace, readJsonl, TraceRecordSchema, AgentActionSchema } from '@personal-growth/shared';
 import { AgentCore, type StructuredModelPort } from '@personal-growth/agent-core';
 import type { AgentAction, AgentTrigger } from '@personal-growth/shared';
@@ -15,11 +16,12 @@ const ProcessingEntrySchema = z.object({ messageId: z.string().min(1), sessionId
 const ConversationStateSchema = z.object({ next: z.record(z.string(), z.number().int().nonnegative()), entries: z.record(ProcessingEntrySchema).default({}) }).strict();
 const DispatchStateSchema = z.object({ dispatched: z.record(z.object({ at: z.string(), status: z.enum(['pending', 'completed']), owner: z.string().optional(), leaseUntil: z.string().optional(), action: AgentActionSchema.optional() }).strict()) }).strict();
 const RuntimeTraceEvents = new Set(['action.accepted', 'action.rejected', 'qq.inbound', 'qq.outbound', 'memory.consolidate', 'memory.apply', 'heartbeat.foreground', 'heartbeat.background', 'schedule.dispatch', 'skill.created', 'plugin.proposed']);
+type DeliveryScope = { messageId?: string; stableKey?: string; effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> };
 
 export interface GoalContextPort { getCurrentGoal(trigger: AgentTrigger): string | undefined | Promise<string | undefined>; }
 export interface RuntimeModel extends StructuredModelPort { compress?(events: readonly { content: string }[]): string | Promise<string>; propose?(input: { newHistory: readonly unknown[]; profile: string; index: string; relevantMemories: readonly string[] }): unknown[] | Promise<unknown[]>; }
 export interface RuntimeOptions extends BootstrapOptions { peerId: string; now?: () => string; model?: RuntimeModel; goalPort?: GoalContextPort; }
-export interface WorkerOptions { cadenceMs?: number; maxTicks?: number; wait?: (milliseconds: number) => Promise<void>; foreground?: () => Promise<unknown>; background?: () => Promise<unknown>; dispatch?: () => Promise<unknown>; }
+export interface WorkerOptions { cadenceMs?: number; maxTicks?: number; keepAlive?: boolean; runImmediately?: boolean; wait?: (milliseconds: number) => Promise<void>; foreground?: () => Promise<unknown>; background?: () => Promise<unknown>; dispatch?: () => Promise<unknown>; }
 export interface LiveRuntimeOptions extends RuntimeOptions { model: RuntimeModel; goalPort: GoalContextPort; transport: QqTransport; inbound: AsyncIterable<QqInbound>; scheduleTool: DshLiveScheduleTool; }
 export interface RuntimeSchedulePort extends DshSchedulePort { recover?: (at: string) => Promise<ScheduleBinding[]>; reconcilePending?: (key: string, resolution: PendingScheduleResolution) => Promise<ScheduleBinding | null>; }
 export interface ProcessResult { trigger: AgentTrigger; action: AgentAction; }
@@ -44,7 +46,7 @@ export class PersonalGrowthRuntime {
   private readonly sessionId: string;
   private processQueue: Promise<unknown> = Promise.resolve();
   private readonly dispatchOwner = randomUUID();
-  private activeDelivery?: { messageId?: string; stableKey?: string; effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> };
+  private readonly deliveryScopes = new AsyncLocalStorage<DeliveryScope>();
   private running = false;
 
   private constructor(boot: BootstrappedRuntime, options: RuntimeOptions, qq: RuntimeQq, schedules: RuntimeSchedulePort, model: RuntimeModel) {
@@ -104,10 +106,10 @@ export class PersonalGrowthRuntime {
       let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
       if (entry?.action) action = entry.action;
       else {
-        this.activeDelivery = { messageId: envelope.messageId, effects: [] };
+        const scope: DeliveryScope = { messageId: envelope.messageId, effects: [] };
         const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
-        try { action = await this.core.handle(trigger); effects = this.activeDelivery.effects; }
-        finally { clearInterval(renewal); this.activeDelivery = undefined; }
+        try { action = await this.deliveryScopes.run(scope, () => this.core.handle(trigger)); effects = scope.effects; }
+        finally { clearInterval(renewal); }
         if (entry) await this.recordProcessingAction(envelope.messageId, action);
       }
       if (userTrigger) {
@@ -126,14 +128,14 @@ export class PersonalGrowthRuntime {
   }
   async start(options: WorkerOptions = {}): Promise<void> {
     this.running = true;
-    const inboundLoop = async () => { while (this.running) { const result = await this.processNext(); if (!result) break; } };
-    const workerEnabled = options.maxTicks !== undefined || options.foreground || options.background || options.dispatch;
+    const workerEnabled = options.maxTicks !== undefined || options.cadenceMs !== undefined || options.foreground || options.background || options.dispatch;
+    const inboundLoop = async () => { while (this.running) { const result = await this.processNext(); if (!result) break; } if (workerEnabled && options.keepAlive === false) this.running = false; };
     if (!workerEnabled) { await inboundLoop(); return; }
     const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
     const foreground = options.foreground ?? (() => this.runForeground(`worker-foreground-${this.now()}`, 'low'));
     const background = options.background ?? (() => this.runBackground(`worker-background-${this.now()}`));
     const dispatch = options.dispatch ?? (() => this.dispatchDue());
-    const workerLoop = async () => { let ticks = 0; while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { await Promise.all([foreground(), background(), dispatch()]); ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await wait(options.cadenceMs ?? 1000); } };
+    const workerLoop = async () => { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await wait(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { await Promise.all([foreground(), background(), dispatch()]); ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await wait(options.cadenceMs ?? 1000); } };
     await Promise.all([inboundLoop(), workerLoop()]); this.running = false;
   }
   stop(): void { this.running = false; void this.qq.close?.(); }
@@ -171,15 +173,15 @@ export class PersonalGrowthRuntime {
       const current = claimed.state.dispatched[key]; let action: AgentAction; let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
       if (current?.action) action = current.action;
       else {
-        this.activeDelivery = { stableKey: key, effects: [] };
+        const scope: DeliveryScope = { stableKey: key, effects: [] };
         const renewal = this.startLeaseRenewal(() => this.renewDispatchLease(key));
         try {
-          action = await this.core.handle(trigger); effects = this.activeDelivery.effects;
+          action = await this.deliveryScopes.run(scope, () => this.core.handle(trigger)); effects = scope.effects;
           await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner) throw new Error('schedule dispatch ownership lost'); record.action = AgentActionSchema.parse(action); });
         } catch (error) {
           await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (record?.owner === this.dispatchOwner && record.status === 'pending') delete state.dispatched[key]; });
           throw error;
-        } finally { clearInterval(renewal); this.activeDelivery = undefined; }
+        } finally { clearInterval(renewal); }
       }
       if (!effects.length && (action.type === 'RESPOND' || action.type === 'MESSAGE_USER')) effects = [{ text: action.text, trigger, stableKey: key }];
       await this.flushDeliveries(effects); results.push({ trigger, action }); await this.traceEvent('schedule.dispatch', { scheduleId: binding.id, status: 'completed' });
@@ -193,9 +195,13 @@ export class PersonalGrowthRuntime {
     return parsed.records.slice(-limit).map((record) => { if (!RuntimeTraceEvents.has(record.event) || !record.data || typeof record.data !== 'object' || Array.isArray(record.data)) throw new Error('trace contains an unsupported event or payload'); const data = record.data as Record<string, unknown>; if (Object.keys(data).some((key) => /content|text|secret|token|password|credential|authorization/i.test(key))) throw new Error('trace contains forbidden raw data'); return { at: record.at, event: record.event, data: redactTrace(data) }; });
   }
   private async relevantMemories(trigger: AgentTrigger): Promise<readonly string[]> {
-    const query = trigger.type === 'user_message' ? trigger.text : trigger.type === 'schedule' ? trigger.prompt : '';
-    if (!query.trim()) return [];
-    return (await this.memory.search(query.trim().slice(0, 200), 5)).map((entry) => entry.raw.slice(0, 4000));
+    const heartbeatQuery = 'long-term goals recent progress support priorities';
+    const query = trigger.type === 'user_message' ? trigger.text : trigger.type === 'schedule' ? trigger.prompt : heartbeatQuery;
+    const profile = trigger.type === 'user_message' || trigger.type === 'schedule' ? '' : await this.memory.readProfile();
+    const matches = await this.memory.search(query.trim().slice(0, 200), 5);
+    const values = matches.map((entry) => entry.raw.slice(0, 4000));
+    if (profile.trim()) values.unshift(profile.slice(0, 4000));
+    return values;
   }
   private async sessionDelta(trigger: AgentTrigger): Promise<string | undefined> {
     const sessionId = trigger.type === 'user_message' ? trigger.sessionId : this.sessionId;
@@ -205,7 +211,7 @@ export class PersonalGrowthRuntime {
     return recent.length ? recent.map((record) => `${record.role}: ${record.content.slice(0, 500)}`).join('\n') : undefined;
   }
   async queryMainConversation(): Promise<string> { return readText(this.mainConversationPath); }
-  private async deliver(text: string, trigger: AgentTrigger, background: boolean): Promise<void> { if (background) throw new Error('background delivery is prohibited'); if (this.activeDelivery) { this.activeDelivery.effects.push({ text, trigger, stableKey: this.activeDelivery.messageId ?? this.activeDelivery.stableKey }); return; } await this.sendDelivery(text, trigger); }
+  private async deliver(text: string, trigger: AgentTrigger, background: boolean): Promise<void> { if (background) throw new Error('background delivery is prohibited'); const scope = this.deliveryScopes.getStore(); if (scope) { scope.effects.push({ text, trigger, stableKey: scope.messageId ?? scope.stableKey }); return; } await this.sendDelivery(text, trigger); }
   private async sendDelivery(text: string, trigger: AgentTrigger, stableKey?: string): Promise<void> { const stable = stableKey ?? ('occurrenceId' in trigger ? trigger.occurrenceId : undefined); const key = stable ? `message:${trigger.type}:${stable}` : `message:${trigger.type}:${trigger.at}:${createHash('sha256').update(text).digest('hex').slice(0, 12)}`; await this.qq.send({ occurrenceId: stable ?? key, idempotencyKey: key, text, background: false }); await this.traceEvent('qq.outbound', { idempotencyKey: key, status: 'sent' }); }
   private async flushDeliveries(effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }>): Promise<void> { for (const effect of effects) await this.sendDelivery(effect.text, effect.trigger, effect.stableKey); }
   private startLeaseRenewal(renew: () => Promise<void> | undefined): ReturnType<typeof setInterval> { return setInterval(() => { void renew()?.catch(() => undefined); }, 10_000); }

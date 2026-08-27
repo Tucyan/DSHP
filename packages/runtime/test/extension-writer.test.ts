@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ExtensionWriter } from '../src/extension-writer.js';
@@ -36,5 +36,12 @@ describe('controlled self extension', () => {
     const draft = { name: 'blocked-skill', description: 'Use when the user asks for a blocked workflow.', instructions: 'Input: request. Output: result. Stop when result is written.', positiveTriggers: ['blocked workflow'], negativeTriggers: ['unrelated request'] };
     await expect(writer.createSkill(draft)).rejects.toThrow(/manual recovery|busy/i);
     expect(await readdir(path.join(agentsHome, 'skills'))).toEqual(['blocked-skill-v1']);
+  });
+  it('rejects an internal symlink in the isolated skills root', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-extension-symlink-')); const agentsHome = path.join(root, 'agents-home');
+    await mkdir(agentsHome, { recursive: true }); await mkdir(path.join(root, 'other-skills'), { recursive: true });
+    try { await symlink(path.join(root, 'other-skills'), path.join(agentsHome, 'skills'), 'junction'); } catch { return; }
+    const writer = new ExtensionWriter(agentsHome, path.join(root, 'runtime'));
+    await expect(writer.createSkill({ name: 'safe-skill', description: 'Use when the user asks for a safe workflow.', instructions: 'Input: request. Output: result. Stop when result is written.', positiveTriggers: ['safe workflow'], negativeTriggers: ['unrelated request'] })).rejects.toThrow(/symlink|isolated|outside/i);
   });
 });

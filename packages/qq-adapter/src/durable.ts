@@ -6,7 +6,10 @@ import { z } from 'zod';
 
 const BindingSchema = z.object({ peerId: z.string().min(1), context: z.literal('private') }).strict();
 const LedgerEntrySchema = z.object({ status: z.enum(['pending', 'sent']), occurrenceId: z.string().min(1) }).strict();
-const InboundEntrySchema = z.object({ status: z.enum(['pending', 'completed']), owner: z.string().optional(), leaseUntil: z.string().optional() }).strict();
+const InboundEntrySchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('pending'), owner: z.string().min(1), leaseUntil: z.string().datetime() }).strict(),
+  z.object({ status: z.literal('completed') }).strict(),
+]);
 const StateSchema = z.object({ binding: BindingSchema.nullable(), outbound: z.record(LedgerEntrySchema), inbound: z.record(InboundEntrySchema) }).strict();
 type State = z.infer<typeof StateSchema>;
 
@@ -39,7 +42,7 @@ export class QqDurableStateStore {
   async claimInbound(messageId: string): Promise<'claimed' | 'completed' | 'pending'> { return this.mutate((state) => { const prior = state.inbound[messageId]; if (prior?.status === 'completed') return 'completed'; const now = Date.parse(this.clock()); if (prior?.status === 'pending' && prior.owner !== this.owner && prior.leaseUntil && Date.parse(prior.leaseUntil) > now) return 'pending'; state.inbound[messageId] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + 30_000).toISOString() }; return 'claimed'; }); }
   async renewInbound(messageId: string): Promise<void> { await this.mutate((state) => { const prior = state.inbound[messageId]; if (!prior || prior.status !== 'pending' || prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound lease is not owned by this runtime'); prior.leaseUntil = new Date(Date.parse(this.clock()) + 30_000).toISOString(); }); }
   async completeInbound(messageId: string): Promise<void> { await this.mutate((state) => { const prior = state.inbound[messageId]; if (prior?.status === 'pending' && prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound completion is not owned by this runtime'); state.inbound[messageId] = { status: 'completed' }; }); }
-  async failInbound(messageId: string): Promise<void> { await this.mutate((state) => { if (state.inbound[messageId]?.status === 'pending') delete state.inbound[messageId]; }); }
+  async failInbound(messageId: string): Promise<void> { await this.mutate((state) => { const prior = state.inbound[messageId]; if (!prior || prior.status === 'completed') return; if (prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound failure is not owned by this runtime'); delete state.inbound[messageId]; }); }
   async complete(key: string): Promise<void> { await this.mutate((state) => { const prior = state.outbound[key]; if (!prior || prior.status !== 'pending') throw new QqDurableStateError('OUTBOUND_STATE', 'outbound completion has no pending reservation'); prior.status = 'sent'; }); }
   async fail(key: string): Promise<void> { await this.mutate((state) => { if (state.outbound[key]?.status === 'pending') delete state.outbound[key]; }); }
   async reconcile(key: string, outcome: 'sent' | 'not_sent'): Promise<void> { if (outcome === 'sent') return this.complete(key); await this.fail(key); }

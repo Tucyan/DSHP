@@ -7,7 +7,7 @@ export interface QqInbound { peerId: string; context: 'private' | 'group'; group
 export class SingleUserQqGate {
   constructor(private readonly config: QqConfig, private readonly now: () => string = () => new Date().toISOString()) {}
   accept(event: QqInbound): AgentTrigger | null {
-    if (event.context !== 'private' || event.peerId !== this.config.peerId || !event.text.trim()) return null;
+    if (event.context !== 'private' || event.peerId !== this.config.peerId || !event.text.trim() || typeof event.messageId !== 'string' || !event.messageId || event.messageId.length > 256 || /[\u0000-\u001f\u007f]/u.test(event.messageId)) return null;
     const trigger = { type: 'user_message' as const, sessionId: `qq:${this.config.peerId}`, text: event.text, at: event.at ?? this.now() };
     const parsed = AgentTriggerSchema.safeParse(trigger);
     return parsed.success ? parsed.data : null;

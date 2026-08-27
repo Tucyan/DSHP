@@ -10,6 +10,9 @@ import type { AgentTrigger } from '@personal-growth/shared';
 class FailingScheduleModel extends DemoModel {
   async generateAction(context: AgentContext, trigger: AgentTrigger) { if (trigger.type === 'schedule') throw new Error('simulated crash'); return super.generateAction(context, trigger); }
 }
+class ConcurrentScheduleModel extends DemoModel {
+  async generateAction(context: AgentContext, trigger: AgentTrigger) { if (trigger.type === 'schedule') { await new Promise((resolve) => setTimeout(resolve, 20)); return { type: 'MESSAGE_USER', text: `scheduled:${trigger.prompt}`, importance: 'normal' as const }; } return super.generateAction(context, trigger); }
+}
 
 describe('schedule dispatch', () => {
   it('dispatches due once schedules exactly once across restart', async () => {
@@ -53,5 +56,19 @@ describe('schedule dispatch', () => {
     const restarted = await createRuntime({ repoRoot: root, peerId: 'peer-1', now: () => '2026-08-27T10:01:00.000Z' });
     expect(await restarted.dispatchDue('2026-08-27T10:01:00.000Z')).toHaveLength(1);
     expect(restarted.qq.outbox).toHaveLength(0);
+  });
+  it('isolates delivery effects when independent schedules run concurrently', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-schedule-concurrent-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', model: new ConcurrentScheduleModel(), now: () => '2026-08-27T10:00:00.000Z' });
+    await runtime.schedule({ idempotencyKey: 'a', sessionId: 'qq:peer-1', prompt: 'alpha', kind: 'once', at: '2026-08-27T09:00:00.000Z' });
+    await runtime.schedule({ idempotencyKey: 'b', sessionId: 'qq:peer-1', prompt: 'beta', kind: 'once', at: '2026-08-27T09:00:00.000Z' });
+    const [first, second] = await Promise.all([runtime.dispatchDue('2026-08-27T10:00:00.000Z'), runtime.dispatchDue('2026-08-27T10:00:00.000Z')]);
+    expect(first.length + second.length).toBe(2); expect(runtime.qq.outbox.map((item) => item.text).sort()).toEqual(['scheduled:alpha', 'scheduled:beta']);
+  });
+  it('claims one schedule occurrence across independently opened runtimes', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-schedule-multi-runtime-')); const first = await createRuntime({ repoRoot: root, peerId: 'peer-1', model: new ConcurrentScheduleModel(), now: () => '2026-08-27T10:00:00.000Z' });
+    await first.schedule({ idempotencyKey: 'multi', sessionId: 'qq:peer-1', prompt: 'multi', kind: 'once', at: '2026-08-27T09:00:00.000Z' });
+    const second = await createRuntime({ repoRoot: root, peerId: 'peer-1', model: new ConcurrentScheduleModel(), now: () => '2026-08-27T10:00:00.000Z' });
+    const [a, b] = await Promise.all([first.dispatchDue('2026-08-27T10:00:00.000Z'), second.dispatchDue('2026-08-27T10:00:00.000Z')]);
+    expect(a.length + b.length).toBe(1); expect(first.qq.outbox.length + second.qq.outbox.length).toBe(1);
   });
 });

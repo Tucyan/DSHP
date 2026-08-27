@@ -55,7 +55,7 @@ describe('QQ durable binding and outbound ledger', () => {
     const first = await QqDurableStateStore.open(statePath, root, () => now); const second = await QqDurableStateStore.open(statePath, root, () => now);
     expect(await first.claimInbound('message')).toBe('claimed'); expect(await second.claimInbound('message')).toBe('pending');
     now = '2026-08-27T10:00:31.000Z'; expect(await second.claimInbound('message')).toBe('claimed');
-    await expect(first.completeInbound('message')).rejects.toMatchObject({ code: 'INBOUND_STATE' });
+    await expect(first.failInbound('message')).rejects.toMatchObject({ code: 'INBOUND_STATE' });
     await second.completeInbound('message'); expect(await first.claimInbound('message')).toBe('completed');
   });
   it('keeps independent concurrent keys in one durable state', async () => {

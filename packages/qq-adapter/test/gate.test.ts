@@ -19,4 +19,10 @@ describe('QQ single-user gate', () => {
     expect(() => parseQqConfig({ peerId: 'u', appId: 'a', appSecret: 'plain' })).toThrow();
     expect(() => parseQqConfig({ peerId: 'u', appId: 'a', appSecretEnv: 'x', extra: true })).toThrow();
   });
+  it('rejects missing, oversized, and control-character message ids', () => {
+    const gate = new SingleUserQqGate(cfg);
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: '', text: 'hello' })).toBeNull();
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'x'.repeat(257), text: 'hello' })).toBeNull();
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'bad\u0000id', text: 'hello' })).toBeNull();
+  });
 });
