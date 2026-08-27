@@ -118,7 +118,7 @@ async function withLock<T>(lockPath: string, timeoutMs: number, operation: () =>
         let raw: string;
         try { raw = await fs.readFile(lockPath, 'utf8'); }
         catch (ownerError) {
-          if (ownerError && typeof ownerError === 'object' && 'code' in ownerError && ownerError.code === 'ENOENT' && Date.now() < transientDeadline) { await new Promise((resolve) => setTimeout(resolve, 10)); continue; }
+          if (ownerError && typeof ownerError === 'object' && 'code' in ownerError && ownerError.code === 'ENOENT') { owner = undefined; break; }
           throw new Error('durable lock owner metadata is unavailable', { cause: ownerError });
         }
         const trimmed = raw.trim();
@@ -126,6 +126,7 @@ async function withLock<T>(lockPath: string, timeoutMs: number, operation: () =>
         try { owner = DurableLockOwnerSchema.parse(JSON.parse(raw)); }
         catch (ownerError) { throw new Error('durable lock owner metadata is malformed or incomplete', { cause: ownerError }); }
       }
+      if (!owner) { if (Date.now() >= deadline) throw new Error('durable lock timeout', { cause: error }); continue; }
       if (Date.now() - Date.parse(owner.createdAt) >= LOCK_GRACE_MS) {
         try { process.kill(owner.pid, 0); } catch (probe) {
           if (probe && typeof probe === 'object' && 'code' in probe && probe.code === 'ESRCH') { await removeIfOwnerMatches(lockPath, owner.token); continue; }

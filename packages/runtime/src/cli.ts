@@ -19,10 +19,10 @@ export function assertLiveCredentials(env: NodeJS.ProcessEnv = process.env): voi
 }
 
 export interface LiveController { runtime: Awaited<ReturnType<typeof createLiveRuntime>>; done: Promise<void>; stop(): void; }
-export async function runLive(repoRoot: string, ports?: { transport: QqTransport; inbound: AsyncIterable<QqInbound>; scheduleTool: DshLiveScheduleTool; peerId: string }): Promise<LiveController> {
+export async function runLive(repoRoot: string, ports?: { transport: QqTransport; inbound: AsyncIterable<QqInbound>; scheduleTool: DshLiveScheduleTool; peerId: string; model: import('./runtime.js').RuntimeModel; goalPort: import('./runtime.js').GoalContextPort }): Promise<LiveController> {
   assertLiveCredentials();
   if (!ports) throw new Error('Live QQ requires injected Tencent transport, inbound stream, and DSH schedule tool; use the managed DSH bridge.');
-  const runtime = await createLiveRuntime({ repoRoot, peerId: ports.peerId, transport: ports.transport, inbound: ports.inbound, scheduleTool: ports.scheduleTool });
+  const runtime = await createLiveRuntime({ repoRoot, peerId: ports.peerId, model: ports.model, goalPort: ports.goalPort, transport: ports.transport, inbound: ports.inbound, scheduleTool: ports.scheduleTool });
   const done = runtime.start(); return { runtime, done, stop: () => runtime.stop() };
 }
 

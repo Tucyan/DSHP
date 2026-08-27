@@ -62,7 +62,7 @@ export class ExtensionWriter {
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         for (let retry = 0; retry < 100; retry++) { try { if (await readFile(target, 'utf8') === skillText(draft)) return { path: target, version, created: false }; } catch (readError) { if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') throw readError; } await new Promise((resolve) => setTimeout(resolve, 5)); }
-        continue;
+        throw new Error('skill version is busy; manual recovery required');
       }
       const temporary = `${target}.${randomUUID()}.tmp`;
       try {

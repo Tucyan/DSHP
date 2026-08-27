@@ -50,6 +50,14 @@ describe('QQ durable binding and outbound ledger', () => {
     expect(results.filter((result) => result.status === 'fulfilled' && result.value === 'claimed')).toHaveLength(1);
     await expect(first.claim('same', 'o1')).rejects.toMatchObject({ code: 'OUTBOUND_UNCERTAIN' });
   });
+  it('leases inbound claims across runtimes and allows only an expired lease to recover', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-inbound-')); const statePath = path.join(root, 'data', 'qq-state.json'); let now = '2026-08-27T10:00:00.000Z';
+    const first = await QqDurableStateStore.open(statePath, root, () => now); const second = await QqDurableStateStore.open(statePath, root, () => now);
+    expect(await first.claimInbound('message')).toBe('claimed'); expect(await second.claimInbound('message')).toBe('pending');
+    now = '2026-08-27T10:00:31.000Z'; expect(await second.claimInbound('message')).toBe('claimed');
+    await expect(first.completeInbound('message')).rejects.toMatchObject({ code: 'INBOUND_STATE' });
+    await second.completeInbound('message'); expect(await first.claimInbound('message')).toBe('completed');
+  });
   it('keeps independent concurrent keys in one durable state', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-'));
     const statePath = path.join(root, 'data', 'qq-state.json');

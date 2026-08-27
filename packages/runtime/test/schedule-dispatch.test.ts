@@ -42,4 +42,16 @@ describe('schedule dispatch', () => {
     const recovered = await (await createRuntime({ repoRoot: root, peerId: 'peer-1', now: () => '2026-08-27T10:00:00.000Z' })).dispatchDue('2026-08-27T10:00:00.000Z');
     expect(recovered).toHaveLength(1);
   });
+
+  it('reconciles a send-success crash without sending the same occurrence twice', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-schedule-send-crash-'));
+    const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', now: () => '2026-08-27T10:00:00.000Z' });
+    await runtime.schedule({ idempotencyKey: 'send-crash', sessionId: 'qq:peer-1', prompt: 'send once', kind: 'once', at: '2026-08-27T09:00:00.000Z' });
+    const originalSend = runtime.qq.send.bind(runtime.qq); let first = true;
+    runtime.qq.send = async (message) => { const sent = await originalSend(message); if (first) { first = false; throw new Error('crash after schedule send'); } return sent; };
+    await expect(runtime.dispatchDue('2026-08-27T10:00:00.000Z')).rejects.toThrow('crash after schedule send');
+    const restarted = await createRuntime({ repoRoot: root, peerId: 'peer-1', now: () => '2026-08-27T10:01:00.000Z' });
+    expect(await restarted.dispatchDue('2026-08-27T10:01:00.000Z')).toHaveLength(1);
+    expect(restarted.qq.outbox).toHaveLength(0);
+  });
 });

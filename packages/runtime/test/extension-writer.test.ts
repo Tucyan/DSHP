@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ExtensionWriter } from '../src/extension-writer.js';
@@ -26,5 +26,15 @@ describe('controlled self extension', () => {
     const proposal = await writer.proposePlugin({ name: 'calendar', capabilityGap: 'calendar read access', design: 'Define a read-only adapter and tests.' });
     expect(proposal.path).toContain('plugin-proposals');
     expect(await readdir(path.join(root, 'runtime', 'plugin-proposals'))).toHaveLength(1);
+  });
+
+  it('fails closed on an unresolved skill writer lock instead of silently consuming versions', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-extension-lock-')); const agentsHome = path.join(root, 'agents-home');
+    const lockDir = path.join(agentsHome, 'skills', 'blocked-skill-v1'); await mkdir(lockDir, { recursive: true });
+    await writeFile(path.join(lockDir, '.skill-writer.lock'), '{"pid":999999,"createdAt":"2020-01-01T00:00:00.000Z"}\n');
+    const writer = new ExtensionWriter(agentsHome, path.join(root, 'runtime'));
+    const draft = { name: 'blocked-skill', description: 'Use when the user asks for a blocked workflow.', instructions: 'Input: request. Output: result. Stop when result is written.', positiveTriggers: ['blocked workflow'], negativeTriggers: ['unrelated request'] };
+    await expect(writer.createSkill(draft)).rejects.toThrow(/manual recovery|busy/i);
+    expect(await readdir(path.join(agentsHome, 'skills'))).toEqual(['blocked-skill-v1']);
   });
 });

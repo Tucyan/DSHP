@@ -16,6 +16,10 @@ describe('runtime bootstrap', () => {
     await (await import('node:fs/promises')).writeFile(soul, edited);
     await bootstrapRuntime({ repoRoot: root });
     expect(await readFile(soul, 'utf8')).toBe(edited);
+    const agent = path.join(root, 'workspace', 'AGENT.md');
+    await (await import('node:fs/promises')).writeFile(agent, '# human mission edit\n');
+    await bootstrapRuntime({ repoRoot: root });
+    expect(await readFile(agent, 'utf8')).toBe('# human mission edit\n');
     expect(first.paths.workspace).toContain(path.join(root, 'workspace'));
   });
 });
