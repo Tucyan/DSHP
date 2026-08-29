@@ -52,6 +52,26 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('rejects array-shaped maps and non-string legacy identifiers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-strict-shapes-'))
+    try {
+      const file = join(root, 'bridge.json')
+      await writeFile(file, JSON.stringify({ inbound: [1], outbound: [], sequences: [], histories: {} }))
+      await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/malformed/i)
+      await writeFile(file, JSON.stringify({ inbound: [], outbound: [null], sequences: {}, histories: [] }))
+      await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/malformed/i)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('rejects sent outbound records carrying stale lease or payload metadata', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-sent-shape-'))
+    try {
+      const file = join(root, 'bridge.json')
+      await writeFile(file, JSON.stringify({ inbound: {}, outbound: { o1: { status: 'sent', target: { peerId: 'p' }, text: 'stale' } }, sequences: {}, histories: {} }))
+      await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/sent|lease|payload|malformed/i)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('rejects sequence overflow before persisting the increment', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-seq-'))
     try {
@@ -59,6 +79,29 @@ describe('FileBridgeState', () => {
       await writeFile(file, JSON.stringify({ inbound: {}, outbound: [], sequences: { s: 1000000 }, histories: {}, traces: [] }))
       await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/sequence|bound/i)
       expect(JSON.parse(await readFile(file, 'utf8')).sequences.s).toBe(1000000)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('uses an atomic single-file owner lock without an owner-file gap', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-lock-file-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const state = new FileBridgeState(file)
+      expect(await state.nextSequence('s')).toBe(1)
+      await expect(readFile(`${file}.lock-owner`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(readFile(`${file}.lock`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('renews an inbound claim only for its owning instance', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-renew-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const first = new FileBridgeState(file)
+      const second = new FileBridgeState(file)
+      expect(await first.claimInbound('m1')).toBe('claimed')
+      await expect(first.renewInbound('m1')).resolves.toBeUndefined()
+      await expect(second.renewInbound('m1')).rejects.toThrow(/ownership/i)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
@@ -85,9 +128,8 @@ describe('FileBridgeState', () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-lock-'))
     try {
       const file = join(root, 'bridge.json')
-      const lock = `${file}.lock`
-      await mkdir(lock, { recursive: true })
-      await writeFile(join(lock, 'owner.json'), JSON.stringify({ token: '00000000-0000-4000-8000-000000000001', pid: 1, leaseUntil: '2020-01-01T00:00:00.000Z' }))
+      const lock = `${file}.lock-owner`
+      await writeFile(lock, JSON.stringify({ token: '00000000-0000-4000-8000-000000000001', pid: 1, leaseUntil: '2020-01-01T00:00:00.000Z' }))
       expect(await new FileBridgeState(file).nextSequence('s')).toBe(1)
     } finally { await rm(root, { recursive: true, force: true }) }
   })

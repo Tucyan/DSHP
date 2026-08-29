@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
-import { dirname, resolve, parse, join } from 'node:path'
+import { dirname, resolve, parse } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import type { BridgeState, OutboundEnvelope } from './bridge.js'
 
@@ -31,6 +31,7 @@ function parseLease(value: unknown): OutboundRecord {
     if (typeof target.peerId !== 'string' || target.peerId.length < 1 || target.peerId.length > MAX_ID || (target.messageId !== undefined && (typeof target.messageId !== 'string' || target.messageId.length > MAX_ID))) throw new Error('Malformed outbound target')
   }
   if ((object.status === 'pending' || object.status === 'unknown') && (!object.target || typeof object.text !== 'string' || !object.text)) throw new Error('Outbound payload is required for pending/unknown state')
+  if (object.status === 'sent' && (object.owner !== undefined || object.leaseUntil !== undefined || object.target !== undefined || object.text !== undefined)) throw new Error('Sent outbound state may not carry lease or payload metadata')
   return object as unknown as OutboundRecord
 }
 function parseInbound(value: unknown): InboundRecord {
@@ -38,6 +39,7 @@ function parseInbound(value: unknown): InboundRecord {
   if (object.status !== 'pending' && object.status !== 'completed') throw new Error('Malformed inbound state')
   validateLeaseFields(object)
   if (object.status === 'pending' && (typeof object.owner !== 'string' || typeof object.leaseUntil !== 'string')) throw new Error('Inbound lease metadata is required')
+  if (object.status === 'completed' && (object.owner !== undefined || object.leaseUntil !== undefined)) throw new Error('Completed inbound state may not carry lease metadata')
   return object as InboundRecord
 }
 function validateLeaseFields(object: Record<string, unknown>): void {
@@ -74,6 +76,7 @@ export class FileBridgeState implements BridgeState {
   }
 
   claimInbound(messageId: string): Promise<'claimed' | 'completed' | 'pending'> {
+    this.assertId(messageId)
     return this.update(state => {
       const record = state.inbound[messageId]
       if (record?.status === 'completed') return 'completed' as const
@@ -81,6 +84,15 @@ export class FileBridgeState implements BridgeState {
       if (record?.status === 'pending' && record.leaseUntil && Date.parse(record.leaseUntil) > now && record.owner !== this.owner) return 'pending' as const
       state.inbound[messageId] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString() }
       return 'claimed' as const
+    })
+  }
+
+  renewInbound(messageId: string): Promise<void> {
+    this.assertId(messageId)
+    return this.update(state => {
+      const record = state.inbound[messageId]
+      if (record?.status !== 'pending' || record.owner !== this.owner) throw new Error('bridge inbound ownership lost')
+      record.leaseUntil = new Date(Date.now() + this.lockTimeoutMs).toISOString()
     })
   }
 
@@ -231,10 +243,16 @@ export class FileBridgeState implements BridgeState {
   }
 
   private async acquireLock(): Promise<string> {
-    const lock = `${this.filename}.lock`; const deadline = Date.now() + this.lockTimeoutMs
+    const lock = `${this.filename}.lock-owner`; const legacyLock = `${this.filename}.lock`; const deadline = Date.now() + this.lockTimeoutMs
     await mkdir(dirname(this.filename), { recursive: true })
+    try {
+      const stat = await lstat(legacyLock)
+      if (stat.isDirectory()) throw new Error('bridge state legacy lock protocol detected')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
     while (true) {
-      try { await mkdir(lock); await writeFile(join(lock, 'owner.json'), JSON.stringify({ token: this.owner, pid: process.pid, leaseUntil: new Date(Date.now() + this.lockTimeoutMs).toISOString() }) + '\n', { encoding: 'utf8', flag: 'wx' }); return lock }
+      try { await writeFile(lock, JSON.stringify({ token: this.owner, pid: process.pid, leaseUntil: new Date(Date.now() + this.lockTimeoutMs).toISOString() }) + '\n', { encoding: 'utf8', flag: 'wx' }); return lock }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
         if (await this.reclaimStaleLock(lock)) continue
@@ -246,14 +264,14 @@ export class FileBridgeState implements BridgeState {
 
   private async reclaimStaleLock(lock: string): Promise<boolean> {
     let owner: LockOwner
-    try { owner = parseLockOwner(JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8'))) } catch { return false }
+    try { owner = parseLockOwner(JSON.parse(await readFile(lock, 'utf8'))) } catch { return false }
     if (Date.parse(owner.leaseUntil) > Date.now()) return false
     const tombstone = `${lock}.${randomUUID()}.stale`
     try { await rename(lock, tombstone) } catch { return false }
     try {
-      const current = parseLockOwner(JSON.parse(await readFile(join(tombstone, 'owner.json'), 'utf8')))
+      const current = parseLockOwner(JSON.parse(await readFile(tombstone, 'utf8')))
       if (current.token !== owner.token || Date.parse(current.leaseUntil) > Date.now()) return false
-      await rm(tombstone, { recursive: true, force: true }); return true
+      await rm(tombstone, { force: true }); return true
     } finally {
       try { await lstat(tombstone); await rename(tombstone, lock) } catch { /* reclaimed or already replaced */ }
     }
@@ -261,8 +279,14 @@ export class FileBridgeState implements BridgeState {
 
   private async releaseLock(lock: string): Promise<void> {
     try {
-      const owner = parseLockOwner(JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8')))
-      if (owner.token === this.owner) await rm(lock, { recursive: true, force: true })
+      const owner = parseLockOwner(JSON.parse(await readFile(lock, 'utf8')))
+      if (owner.token !== this.owner) return
+      const tombstone = `${lock}.${randomUUID()}.release`
+      await rename(lock, tombstone)
+      try {
+        const current = parseLockOwner(JSON.parse(await readFile(tombstone, 'utf8')))
+        if (current.token === this.owner) await rm(tombstone, { force: true })
+      } catch { /* preserve a lock whose ownership cannot be proven */ }
     } catch { /* preserve locks whose ownership cannot be proven */ }
   }
 
@@ -300,16 +324,18 @@ export class FileBridgeState implements BridgeState {
       if (Object.keys(parsed).some(key => !allowed.has(key))) throw new Error('Malformed bridge state: unknown field')
       const inbound: Record<string, InboundRecord> = {}
       if (Array.isArray(parsed.inbound)) {
-        for (const id of parsed.inbound) { this.assertId(String(id)); inbound[String(id)] = { status: 'completed' } }
+        for (const id of parsed.inbound) { if (typeof id !== 'string' || !id) throw new Error('Malformed legacy inbound state'); this.assertId(id); inbound[id] = { status: 'completed' } }
       } else if (parsed.inbound && typeof parsed.inbound === 'object') {
         for (const [id, value] of Object.entries(parsed.inbound as Record<string, unknown>)) { this.assertId(id); inbound[id] = parseInbound(value) }
       } else if (parsed.inbound !== undefined) throw new Error('Malformed bridge state: inbound')
       const outbound: Record<string, OutboundRecord> = {}
-      if (Array.isArray(parsed.outbound)) for (const key of parsed.outbound) { this.assertId(String(key)); outbound[String(key)] = { status: 'sent' } }
+      if (Array.isArray(parsed.outbound)) for (const key of parsed.outbound) { if (typeof key !== 'string' || !key) throw new Error('Malformed legacy outbound state'); this.assertId(key); outbound[key] = { status: 'sent' } }
       else if (parsed.outbound && typeof parsed.outbound === 'object') for (const [key, value] of Object.entries(parsed.outbound as Record<string, unknown>)) { this.assertId(key); outbound[key] = parseLease(value) }
       else if (parsed.outbound !== undefined) throw new Error('Malformed bridge state: outbound')
+      if (parsed.sequences !== undefined && (parsed.sequences === null || typeof parsed.sequences !== 'object' || Array.isArray(parsed.sequences))) throw new Error('Malformed bridge state: sequences')
       const sequences = parsed.sequences && typeof parsed.sequences === 'object' ? Object.fromEntries(Object.entries(parsed.sequences).map(([key, value]) => { this.assertId(key); if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > MAX_SEQ) throw new Error('bridge sequence exceeds bounds'); return [key, value] })) as Record<string, number> : {}
       const histories: Record<string, HistoryRecordState> = {}
+      if (parsed.histories !== undefined && (parsed.histories === null || typeof parsed.histories !== 'object' || Array.isArray(parsed.histories))) throw new Error('Malformed bridge state: histories')
       if (parsed.histories && typeof parsed.histories === 'object') {
         for (const [id, value] of Object.entries(parsed.histories as Record<string, unknown>)) { this.assertId(id); histories[id] = parseInbound(value) }
       }

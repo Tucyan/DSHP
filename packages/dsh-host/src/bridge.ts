@@ -54,6 +54,7 @@ export interface BridgeDream {
 export interface BridgeState {
   acceptInbound(messageId: string): Promise<boolean>
   claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>
+  renewInbound?(messageId: string): Promise<void>
   completeInbound?(messageId: string): Promise<void>
   failInbound?(messageId: string): Promise<void>
   claimHistory?(historyId: string): Promise<boolean>
@@ -235,48 +236,82 @@ export class PersonalGrowthBridge {
 
   private async process(message: BridgeInbound): Promise<void> {
     if (!this.started || message.context !== 'private' || message.peerId !== this.options.allowedPeerId || !message.text.trim()) return
-    const agent = await this.getForeground()
     const sessionId = sessionIdForPeer(this.options.allowedPeerId)
     const inboundState = this.options.state?.claimInbound
       ? await this.options.state.claimInbound(message.messageId)
       : (this.options.state && !await this.options.state.acceptInbound(message.messageId) ? 'completed' : 'claimed')
     await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: inboundState })
     if (inboundState && inboundState !== 'claimed') return
-    const profile = await this.options.memory.readProfile()
-    const relevant = await this.options.memory.search(message.text, 8)
-    agent.inject({ text: `长期用户上下文\nPROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}`, source: 'personal-memory' })
-    const before = agent.events?.() ?? []
-    this.observed.delete(sessionId)
-    this.activeMessageIds.set(sessionId, message.messageId)
+    let lost = false
+    let renewalInFlight: Promise<void> | undefined
+    const renew = () => {
+      if (renewalInFlight || lost || !this.options.state?.renewInbound) return
+      renewalInFlight = this.options.state.renewInbound(message.messageId).catch(async error => {
+        lost = true
+        await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'lease-lost', reason: 'renewal_failure' }).catch(() => undefined)
+        throw error
+      }).finally(() => { renewalInFlight = undefined })
+      // The timer owns this promise; keep rejection handled and let the process check lost.
+      void renewalInFlight.catch(() => undefined)
+    }
+    const renewal = setInterval(renew, 10_000)
+    const ensureLease = async () => {
+      await renewalInFlight?.catch(() => undefined)
+      if (lost) throw new Error('bridge inbound ownership lost')
+    }
     try {
+      const agent = await this.getForeground()
+      await ensureLease()
+      const profile = await this.options.memory.readProfile()
+      await ensureLease()
+      const relevant = await this.options.memory.search(message.text, 8)
+      await ensureLease()
+      agent.inject({ text: `长期用户上下文\nPROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}`, source: 'personal-memory' })
+      const before = agent.events?.() ?? []
+      this.observed.delete(sessionId)
+      this.activeMessageIds.set(sessionId, message.messageId)
       agent.followup({ text: message.text, source: 'user' })
       await agent.whenIdle()
-    } finally {
-      this.activeMessageIds.delete(sessionId)
-    }
-    const after = agent.events?.() ?? []
-    const assistantText = this.observed.get(sessionId) ?? textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
-    if (assistantText?.trim() && !this.observed.has(sessionId)) {
-      const key = `${sessionId}:turn:${message.messageId}`
-      await this.sendOutbound(key, { peerId: message.peerId, messageId: message.messageId }, assistantText)
-    }
-    if (this.options.processMemory === false) {
+      await ensureLease()
+      const after = agent.events?.() ?? []
+      const assistantText = this.observed.get(sessionId) ?? textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
+      if (assistantText?.trim() && !this.observed.has(sessionId)) {
+        await ensureLease()
+        const key = `${sessionId}:turn:${message.messageId}`
+        await this.sendOutbound(key, { peerId: message.peerId, messageId: message.messageId }, assistantText)
+        await ensureLease()
+      }
+      if (this.options.processMemory === false) {
+        await ensureLease()
+        await this.options.state?.completeInbound?.(message.messageId)
+        await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'completed' })
+        return
+      }
+      const at = message.at ?? this.options.now?.() ?? new Date().toISOString()
+      const events: ConversationEvent[] = [
+        { sessionId, seq: await this.nextSequence(sessionId), role: 'user', content: message.text, at },
+      ]
+      await ensureLease()
+      if (assistantText?.trim()) events.push({ sessionId, seq: await this.nextSequence(sessionId), role: 'assistant', content: assistantText, at: this.options.now?.() ?? at })
+      await ensureLease()
+      const history = await this.options.memory.consume(events)
+      await ensureLease()
+      if (history && this.options.dream) {
+        const proposals = await this.options.dream.propose({ newHistory: [history], profile, index: await this.options.memory.readIndex(), relevantMemories: relevant })
+        await ensureLease()
+        for (const proposal of proposals) {
+          await this.options.memory.apply(proposal)
+          await ensureLease()
+        }
+      }
+      await ensureLease()
       await this.options.state?.completeInbound?.(message.messageId)
       await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'completed' })
-      return
+    } finally {
+      clearInterval(renewal)
+      await renewalInFlight?.catch(() => undefined)
+      this.activeMessageIds.delete(sessionId)
     }
-    const at = message.at ?? this.options.now?.() ?? new Date().toISOString()
-    const events: ConversationEvent[] = [
-      { sessionId, seq: await this.nextSequence(sessionId), role: 'user', content: message.text, at },
-    ]
-    if (assistantText?.trim()) events.push({ sessionId, seq: await this.nextSequence(sessionId), role: 'assistant', content: assistantText, at: this.options.now?.() ?? at })
-    const history = await this.options.memory.consume(events)
-    if (history && this.options.dream) {
-      const proposals = await this.options.dream.propose({ newHistory: [history], profile, index: await this.options.memory.readIndex(), relevantMemories: relevant })
-      for (const proposal of proposals) await this.options.memory.apply(proposal)
-    }
-    await this.options.state?.completeInbound?.(message.messageId)
-    await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'completed' })
   }
 
   private async nextSequence(sessionId: string): Promise<number> {
@@ -331,6 +366,9 @@ export class PersonalGrowthBridge {
 
   private emitTrace(record: { type: string; at: string; key?: string; status?: string; reason?: string }): Promise<void> {
     const safe = { ...record, key: record.key ? createHash('sha256').update(record.key, 'utf8').digest('hex').slice(0, 16) : undefined }
-    return Promise.resolve(this.options.trace?.(safe)).then(() => this.options.state?.trace?.(safe)).then(() => undefined)
+    return Promise.resolve(this.options.trace?.(safe)).then(() => {
+      if (this.options.trace) return undefined
+      return this.options.state?.trace?.(safe)
+    }).then(() => undefined)
   }
 }

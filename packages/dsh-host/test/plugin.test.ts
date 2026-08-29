@@ -35,8 +35,9 @@ describe('production DSH host adapter', () => {
     expect(() => resolveDefaultAgentOptions({} as never)).toThrow(/default model/)
   })
 
-  it('disposes an agent when capabilities remain unavailable by the deadline', async () => {
+  it('disposes an agent when capabilities are unavailable after synchronous creation', async () => {
     let disposed = 0
+    let assertions = 0
     const ctx = {
       sessionPersistence: { async listSnapshots() { return [{ header: { id: 'capability-test' } }] } },
       agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
@@ -45,9 +46,10 @@ describe('production DSH host adapter', () => {
         async create() { throw new Error('must not create') },
       },
     }
-    const registry = createDshAgentRegistry(ctx as never, undefined, () => assertRequiredAgentTools([]))
+    const registry = createDshAgentRegistry(ctx as never, undefined, () => { assertions++; assertRequiredAgentTools([]) })
     await expect(registry.resume({ sessionId: 'capability-test' })).rejects.toThrow(/schedule_create/)
     expect(disposed).toBe(1)
+    expect(assertions).toBe(1)
   })
 
   it('restricts the hidden maintenance agent at unpublished setup time', () => {

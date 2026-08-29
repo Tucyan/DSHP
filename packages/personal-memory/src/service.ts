@@ -120,8 +120,13 @@ export class MemoryService {
     if (proposal.action !== 'IGNORE') {
       const historyEvidence = proposal.sourceEvidence.find((evidence) => evidence.startsWith('history:'));
       const expectedPath = proposal.action === 'MERGE' ? proposal.targetPath : proposal.path;
-      const existing = historyEvidence && revisionLedger.records.find((revision) => revision.action === proposal.action && (revision.path === expectedPath || revision.path === proposal.path) && revision.source.includes(historyEvidence));
-      if (existing) return { accepted: true, action: proposal.action, path: existing.path, revision: existing, trace: { result: 'already-applied' } };
+      if (historyEvidence) {
+        const historyRevisions = revisionLedger.records.filter((revision) => revision.source.includes(historyEvidence));
+        const proposalEvidence = proposal.sourceEvidence.find((evidence) => evidence.startsWith('proposal:'));
+        const existing = historyRevisions.find((revision) => revision.action === proposal.action && (revision.path === expectedPath || revision.path === proposal.path) && (!proposalEvidence ? !revision.source.some((evidence) => evidence.startsWith('proposal:')) : revision.source.includes(proposalEvidence)));
+        if (existing) return { accepted: true, action: proposal.action, path: existing.path, revision: existing, trace: { result: 'already-applied' } };
+        if (historyRevisions.length) throw new Error(`Conflicting memory proposal for ${historyEvidence}`);
+      }
     }
     if (proposal.action === 'IGNORE') return { accepted: true, action: 'IGNORE', path: proposal.path, trace: { result: 'ignored', reason: proposal.reason } };
     const source = proposal.sourceEvidence;
