@@ -27,7 +27,7 @@ export interface LiveRuntimeOptions extends RuntimeOptions { model: RuntimeModel
 export interface RuntimeSchedulePort extends DshSchedulePort { recover?: (at: string) => Promise<ScheduleBinding[]>; reconcilePending?: (key: string, resolution: PendingScheduleResolution) => Promise<ScheduleBinding | null>; }
 export interface ProcessResult { trigger: AgentTrigger; action: AgentAction; }
 export interface RuntimeInboundEnvelope { trigger: AgentTrigger; messageId: string; }
-export interface RuntimeQq extends QqPort { readonly outbox: QqOutbound[]; pushInbound(event: QqInbound): void; close?(): Promise<void>; receiveEnvelope?(): Promise<RuntimeInboundEnvelope | null>; claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>; renewInbound?(messageId: string): Promise<void>; completeInbound?(messageId: string): Promise<void>; failInbound?(messageId: string): Promise<void>; }
+export interface RuntimeQq extends QqPort { readonly outbox: QqOutbound[]; pushInbound(event: QqInbound): void; /** Stop inbound consumption; outbound sends remain available while active work drains. */ close?(): Promise<void>; receiveEnvelope?(): Promise<RuntimeInboundEnvelope | null>; claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>; renewInbound?(messageId: string): Promise<void>; completeInbound?(messageId: string): Promise<void>; failInbound?(messageId: string): Promise<void>; }
 
 export class PersonalGrowthRuntime {
   readonly paths: BootstrappedRuntime['paths'];
@@ -55,7 +55,7 @@ export class PersonalGrowthRuntime {
 
   private constructor(boot: BootstrappedRuntime, options: RuntimeOptions, qq: RuntimeQq, schedules: RuntimeSchedulePort, model: RuntimeModel) {
     this.paths = boot.paths; this.now = options.now ?? (() => new Date().toISOString()); this.model = model;
-    const leaseRenewalMs = options.leaseRenewalMs ?? 10_000; if (!Number.isFinite(leaseRenewalMs) || leaseRenewalMs <= 0 || leaseRenewalMs > 30_000) throw new Error('leaseRenewalMs must be finite and between 1ms and 30000ms'); this.leaseRenewalMs = leaseRenewalMs;
+    const leaseRenewalMs = options.leaseRenewalMs ?? 10_000; if (!Number.isSafeInteger(leaseRenewalMs) || leaseRenewalMs <= 0 || leaseRenewalMs > 15_000) throw new Error('leaseRenewalMs must be a positive integer no greater than 15000ms'); this.leaseRenewalMs = leaseRenewalMs;
     this.sessionId = `qq:${options.peerId}`; this.conversationState = `${this.paths.storage}/conversation-state.json`; this.tracePath = `${this.paths.workspace}/data/traces.jsonl`; this.mainConversationPath = `${this.paths.sessions}/main/conversation.jsonl`; this.scheduleDispatchState = `${this.paths.storage}/schedule-dispatch.json`;
     this.qq = qq; this.schedules = schedules; this.extensions = new ExtensionWriter(this.paths.agentsHome, this.paths.root, this.tracePath);
     const compressor = { compress: (events: readonly ConversationEvent[]) => model.compress?.(events) ?? events.map((event) => event.content).join('；').slice(0, 2000) };

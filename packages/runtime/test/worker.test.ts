@@ -44,6 +44,6 @@ describe('runtime worker', () => {
     runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'drain-message', text: 'hello', at: '2026-08-27T10:00:00.000Z' });
     const running = runtime.start({ maxTicks: 1, cadenceMs: 0, foreground: async () => undefined, background: async () => undefined, dispatch: async () => [] }); await startedSignal;
     let stopped = false; const stopping = runtime.stop().then(() => { stopped = true; }); await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(stopped).toBe(false); release(); await stopping; await expect(running).resolves.toBeUndefined();
+    expect(stopped).toBe(false); release(); await stopping; await expect(running).resolves.toBeUndefined(); expect(runtime.qq.outbox).toHaveLength(1);
   });
 });

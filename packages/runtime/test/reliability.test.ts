@@ -57,4 +57,11 @@ describe('runtime processing durability', () => {
     runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'lease-message', text: 'hello', at: '2026-08-27T10:00:00.000Z' });
     await runtime.processNext(); expect(renewed).toBeGreaterThan(0);
   });
+
+  it('rejects unsafe lease renewal intervals', async () => {
+    for (const leaseRenewalMs of [0, 1.5, 15_001, 30_000, Number.NaN]) {
+      const root = await mkdtemp(path.join(tmpdir(), 'pga-invalid-lease-'));
+      await expect(createRuntime({ repoRoot: root, peerId: 'peer-1', leaseRenewalMs })).rejects.toThrow('leaseRenewalMs');
+    }
+  });
 });
