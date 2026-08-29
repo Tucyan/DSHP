@@ -3,6 +3,7 @@ import { mkdtemp, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRuntime, type WorkerOptions } from '../src/runtime.js';
+import { DemoModel } from '../src/demo-model.js';
 
 describe('runtime worker', () => {
   it('drives inbound-independent heartbeats and due dispatch on injected ticks', async () => {
@@ -33,5 +34,16 @@ describe('runtime worker', () => {
     let drained = false; let closed = false; runtime.qq.close = async () => { closed = true; };
     await expect(runtime.start({ cadenceMs: 0, foreground: async () => { throw new Error('worker failure'); }, background: async () => { await new Promise((resolve) => setTimeout(resolve, 25)); drained = true; }, dispatch: async () => [] })).rejects.toThrow('worker failure');
     expect({ drained, closed }).toEqual({ drained: true, closed: true });
+  });
+
+  it('stop waits for an in-flight inbound core operation to drain', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-worker-drain-')); let release!: () => void; let started!: () => void;
+    const startedSignal = new Promise<void>((resolve) => { started = resolve; }); const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+    class BlockingModel extends DemoModel { override async generateAction(...args: Parameters<DemoModel['generateAction']>) { started(); await releaseSignal; return super.generateAction(...args); } }
+    const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', model: new BlockingModel() });
+    runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'drain-message', text: 'hello', at: '2026-08-27T10:00:00.000Z' });
+    const running = runtime.start({ maxTicks: 1, cadenceMs: 0, foreground: async () => undefined, background: async () => undefined, dispatch: async () => [] }); await startedSignal;
+    let stopped = false; const stopping = runtime.stop().then(() => { stopped = true; }); await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stopped).toBe(false); release(); await stopping; await expect(running).resolves.toBeUndefined();
   });
 });

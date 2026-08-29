@@ -49,10 +49,13 @@ export class PersonalGrowthRuntime {
   private processQueue: Promise<unknown> = Promise.resolve();
   private readonly dispatchOwner = randomUUID();
   private readonly deliveryScopes = new AsyncLocalStorage<DeliveryScope>();
+  private readonly operationScopes = new AsyncLocalStorage<symbol>();
+  private readonly activeOperations = new Map<symbol, Promise<unknown>>();
   private running = false;
 
   private constructor(boot: BootstrappedRuntime, options: RuntimeOptions, qq: RuntimeQq, schedules: RuntimeSchedulePort, model: RuntimeModel) {
-    this.paths = boot.paths; this.now = options.now ?? (() => new Date().toISOString()); this.model = model; this.leaseRenewalMs = options.leaseRenewalMs ?? 10_000;
+    this.paths = boot.paths; this.now = options.now ?? (() => new Date().toISOString()); this.model = model;
+    const leaseRenewalMs = options.leaseRenewalMs ?? 10_000; if (!Number.isFinite(leaseRenewalMs) || leaseRenewalMs <= 0 || leaseRenewalMs > 30_000) throw new Error('leaseRenewalMs must be finite and between 1ms and 30000ms'); this.leaseRenewalMs = leaseRenewalMs;
     this.sessionId = `qq:${options.peerId}`; this.conversationState = `${this.paths.storage}/conversation-state.json`; this.tracePath = `${this.paths.workspace}/data/traces.jsonl`; this.mainConversationPath = `${this.paths.sessions}/main/conversation.jsonl`; this.scheduleDispatchState = `${this.paths.storage}/schedule-dispatch.json`;
     this.qq = qq; this.schedules = schedules; this.extensions = new ExtensionWriter(this.paths.agentsHome, this.paths.root, this.tracePath);
     const compressor = { compress: (events: readonly ConversationEvent[]) => model.compress?.(events) ?? events.map((event) => event.content).join('；').slice(0, 2000) };
@@ -92,7 +95,7 @@ export class PersonalGrowthRuntime {
     return new PersonalGrowthRuntime(boot, options, qq, schedules, model);
   }
 
-  async processNext(): Promise<ProcessResult | null> { const operation = this.processQueue.then(() => this.processNextNow()); this.processQueue = operation.then(() => undefined, () => undefined); return operation; }
+  processNext(): Promise<ProcessResult | null> { const previous = this.processQueue; const operation = this.trackOperation(() => previous.then(() => this.processNextNow())); this.processQueue = operation.then(() => undefined, () => undefined); return operation; }
   private async processNextNow(): Promise<ProcessResult | null> {
     while (true) {
       const envelope = this.qq.receiveEnvelope ? await this.qq.receiveEnvelope() : await this.qq.receive().then((trigger) => trigger ? { trigger, messageId: `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}` } : null);
@@ -103,7 +106,6 @@ export class PersonalGrowthRuntime {
         await this.traceEvent('qq.inbound', { messageId: envelope.messageId, status: 'claimed' });
         const trigger = envelope.trigger; const userTrigger = trigger.type === 'user_message' ? trigger : undefined; const entry = userTrigger ? await this.reserveProcessing(envelope.messageId, userTrigger) : undefined;
         const user = entry && userTrigger ? { sessionId: userTrigger.sessionId, seq: entry.userSeq, role: 'user' as const, content: userTrigger.text, at: userTrigger.at } satisfies ConversationEvent : undefined;
-        if (entry) await this.appendConversationOnce(user!);
         let action: AgentAction;
         let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
         if (entry?.action) action = entry.action;
@@ -141,7 +143,7 @@ export class PersonalGrowthRuntime {
     const foreground = options.foreground ?? (() => this.runForeground(safeOccurrenceFileName(`worker-foreground-${this.now()}`), 'low'));
     const background = options.background ?? (() => this.runBackground(safeOccurrenceFileName(`worker-background-${this.now()}`)));
     const dispatch = options.dispatch ?? (() => this.dispatchDue());
-    const workerLoop = async () => { try { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { const tick = await Promise.allSettled([foreground(), background(), dispatch()]); const failure = tick.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason; ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); } } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
+    const workerLoop = async () => { try { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { const tick = await Promise.allSettled([this.trackOperation(foreground), this.trackOperation(background), this.trackOperation(dispatch)]); const failure = tick.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason; ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); } } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
     const settled = await Promise.allSettled([inboundLoop(), workerLoop()]); this.signalStop(); await this.stop();
     const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason;
   }
@@ -149,7 +151,28 @@ export class PersonalGrowthRuntime {
   private resolveStop?: () => void;
   private stopPromise?: Promise<void>;
   private signalStop(): void { this.running = false; this.resolveStop?.(); }
-  async stop(): Promise<void> { this.signalStop(); this.stopPromise ??= Promise.resolve(this.qq.close?.()).then(() => undefined); await this.stopPromise; }
+  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const token = Symbol('runtime-operation'); let tracked!: Promise<T>;
+    tracked = Promise.resolve().then(() => this.operationScopes.run(token, operation)).finally(() => { if (this.activeOperations.get(token) === tracked) this.activeOperations.delete(token); });
+    this.activeOperations.set(token, tracked); return tracked;
+  }
+  private async drainOperations(): Promise<void> {
+    const current = this.operationScopes.getStore();
+    while (true) {
+      const pending = [...this.activeOperations.entries()].filter(([token]) => token !== current).map(([, operation]) => operation);
+      if (!pending.length) return;
+      await Promise.allSettled(pending);
+    }
+  }
+  async stop(): Promise<void> {
+    this.signalStop();
+    this.stopPromise ??= (async () => {
+      const closing = Promise.resolve(this.qq.close?.());
+      await this.drainOperations();
+      await closing;
+    })();
+    await this.stopPromise;
+  }
   async runBackground(occurrenceId: string): Promise<WakeResult> { const result = await this.heartbeat.wakeBackground({ occurrenceId, at: this.now() }); await this.traceEvent('heartbeat.background', { occurrenceId, status: result.status }); return result; }
   async runForeground(occurrenceId: string, importance: 'low' | 'normal' | 'high' = 'normal'): Promise<WakeResult> { const result = await this.heartbeat.wakeForeground({ occurrenceId, at: this.now(), importance }); await this.traceEvent('heartbeat.foreground', { occurrenceId, status: result.status }); return result; }
   async schedule(request: ScheduleRequest & { idempotencyKey?: string }): Promise<ScheduleBinding> { const { idempotencyKey, ...schedule } = request; return this.schedules.create(schedule, idempotencyKey); }
@@ -217,12 +240,15 @@ export class PersonalGrowthRuntime {
   }
   private async sessionDelta(trigger: AgentTrigger): Promise<string | undefined> {
     const sessionId = trigger.type === 'user_message' ? trigger.sessionId : this.sessionId;
-    const records = await readJsonl(this.mainConversationPath, ConversationEventSchema);
-    if (records.errors.length) throw new Error('main conversation is malformed');
-    const recent = records.records.filter((record) => record.sessionId === sessionId).slice(-6);
-    return recent.length ? recent.map((record) => `${record.role}: ${record.content.slice(0, 500)}`).join('\n') : undefined;
+    const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, async () => {
+      const records = await readJsonl(this.mainConversationPath, ConversationEventSchema);
+      if (records.errors.length) throw new Error('main conversation is malformed');
+      const recent = records.records.filter((record) => record.sessionId === sessionId).slice(-6);
+      return recent.length ? recent.map((record) => `${record.role}: ${record.content.slice(0, 500)}`).join('\n') : undefined;
+    });
+    return transaction.result;
   }
-  async queryMainConversation(): Promise<string> { return readText(this.mainConversationPath); }
+  async queryMainConversation(): Promise<string> { const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, () => readText(this.mainConversationPath)); return transaction.result; }
   private async deliver(text: string, trigger: AgentTrigger, background: boolean): Promise<void> { if (background) throw new Error('background delivery is prohibited'); const scope = this.deliveryScopes.getStore(); if (scope) { scope.effects.push({ text, trigger, stableKey: scope.messageId ?? scope.stableKey }); return; } await this.sendDelivery(text, trigger); }
   private async sendDelivery(text: string, trigger: AgentTrigger, stableKey?: string): Promise<void> { const stable = stableKey ?? ('occurrenceId' in trigger ? trigger.occurrenceId : undefined); const key = stable ? `message:${trigger.type}:${stable}` : `message:${trigger.type}:${trigger.at}:${createHash('sha256').update(text).digest('hex').slice(0, 12)}`; await this.qq.send({ occurrenceId: stable ?? key, idempotencyKey: key, text, background: false }); await this.traceEvent('qq.outbound', { idempotencyKey: key, status: 'sent' }); }
   private async flushDeliveries(effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }>): Promise<void> { for (const effect of effects) await this.sendDelivery(effect.text, effect.trigger, effect.stableKey); }
@@ -232,10 +258,19 @@ export class PersonalGrowthRuntime {
     return { check: () => { if (failure) throw failure instanceof Error ? failure : new Error('lease renewal failed'); }, stop: () => clearInterval(timer) };
   }
   private async renewDispatchLease(key: string): Promise<void> { await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner || record.status !== 'pending') throw new Error('schedule dispatch lease is no longer owned'); record.leaseUntil = new Date(Date.parse(this.now()) + 30_000).toISOString(); }); }
-  private async reserveProcessing(messageId: string, trigger: Extract<AgentTrigger, { type: 'user_message' }>): Promise<z.infer<typeof ProcessingEntrySchema>> { const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entries = state.entries ?? (state.entries = {}); const existing = entries[messageId]; if (existing) return existing; const next = state.next[trigger.sessionId] ?? 0; const entry = { messageId, sessionId: trigger.sessionId, text: trigger.text, at: trigger.at, userSeq: next + 1, assistantSeq: next + 2, status: 'pending' as const }; state.next[trigger.sessionId] = next + 2; entries[messageId] = entry; return entry; }); return transaction.result; }
+  private async reserveProcessing(messageId: string, trigger: Extract<AgentTrigger, { type: 'user_message' }>): Promise<z.infer<typeof ProcessingEntrySchema>> {
+    const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, async (state) => {
+      const entries = state.entries ?? (state.entries = {}); const existing = entries[messageId];
+      const entry = existing ?? (() => { const next = state.next[trigger.sessionId] ?? 0; const created = { messageId, sessionId: trigger.sessionId, text: trigger.text, at: trigger.at, userSeq: next + 1, assistantSeq: next + 2, status: 'pending' as const }; state.next[trigger.sessionId] = next + 2; entries[messageId] = created; return created; })();
+      await this.appendConversationOnceUnlocked({ sessionId: trigger.sessionId, seq: entry.userSeq, role: 'user', content: trigger.text, at: trigger.at });
+      return entry;
+    });
+    return transaction.result;
+  }
   private async completeProcessing(messageId: string, action: AgentAction): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entry = state.entries?.[messageId]; if (!entry) throw new Error('conversation processing journal entry missing'); entry.action = AgentActionSchema.parse(action); entry.status = 'completed'; }); }
   private async recordProcessingAction(messageId: string, action: AgentAction): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entry = state.entries?.[messageId]; if (!entry) throw new Error('conversation processing journal entry missing'); entry.action = AgentActionSchema.parse(action); }); }
-  private async appendConversationOnce(event: ConversationEvent): Promise<void> { const existing = await readJsonl(this.mainConversationPath, ConversationEventSchema); if (existing.errors.length) throw new Error('main conversation is malformed'); const found = existing.records.find((candidate) => candidate.sessionId === event.sessionId && candidate.seq === event.seq); if (found) { if (found.role !== event.role || found.content !== event.content) throw new Error('conversation journal conflict'); return; } await appendJsonl(this.mainConversationPath, event); }
+  private async appendConversationOnce(event: ConversationEvent): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, () => this.appendConversationOnceUnlocked(event)); }
+  private async appendConversationOnceUnlocked(event: ConversationEvent): Promise<void> { const existing = await readJsonl(this.mainConversationPath, ConversationEventSchema); if (existing.errors.length) throw new Error('main conversation is malformed'); const found = existing.records.find((candidate) => candidate.sessionId === event.sessionId && candidate.seq === event.seq); if (found) { if (found.role !== event.role || found.content !== event.content) throw new Error('conversation journal conflict'); return; } await appendJsonl(this.mainConversationPath, event); }
   private async traceEvent(event: string, data: Record<string, unknown>): Promise<void> { await this.writeTrace({ at: this.now(), event, data }); }
   private async writeTrace(record: unknown): Promise<void> { if (!record || typeof record !== 'object') throw new Error('trace record must be an object'); const value = record as { at?: unknown; event?: unknown; data?: unknown }; if (typeof value.at !== 'string' || typeof value.event !== 'string' || !RuntimeTraceEvents.has(value.event) || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw new Error('trace record is outside runtime allowlist'); const data = value.data as Record<string, unknown>; if (Object.keys(data).some((key) => /content|text|secret|token|password|credential|authorization/i.test(key))) throw new Error('trace data contains forbidden fields'); await appendJsonl(this.tracePath, redactTrace({ at: value.at, event: value.event, data })); }
   private async applyDream(proposal: Parameters<MemoryService['apply']>[0]): Promise<void> {
