@@ -402,7 +402,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         }
         const profile = await memory.readProfile(); const index = await memory.readIndex()
         const relevant = await memory.search('capability gap skill improvement', 8)
-        const raw = await hiddenText('maintenance', `你是后台维护器。仅输出严格 JSON AgentAction，只能选择 REFLECT、CREATE_SKILL、PROPOSE_PLUGIN 或 NOOP。长期记忆 proposal 已优先处理；如有能力缺口优先 CREATE_SKILL，其次 PROPOSE_PLUGIN，否则 REFLECT 或 NOOP。绝不联系用户。HISTORY_COUNT:${pending.length}\nPROFILE:\n${profile}\nINDEX:\n${index}\nRELEVANT:\n${relevant.join('\n')}`)
+        const raw = await hiddenText('maintenance', `你是后台维护器。仅输出严格 JSON AgentAction，只能选择 REFLECT、CREATE_SKILL、PROPOSE_PLUGIN 或 NOOP。长期记忆 proposal 已优先处理；如有能力缺口优先 CREATE_SKILL，其次 PROPOSE_PLUGIN，否则 REFLECT 或 NOOP。绝不联系用户。HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${profile}\nINDEX:\n${index}\nRELEVANT:\n${relevant.join('\n')}`)
         return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
       },
     },
