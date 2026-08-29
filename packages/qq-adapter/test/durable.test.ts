@@ -132,12 +132,11 @@ describe('QQ durable binding and outbound ledger', () => {
     await expect(restored.send({ occurrenceId: 'o', idempotencyKey: 'ambiguous', text: 'retry', background: false })).rejects.toMatchObject({ code: 'OUTBOUND_UNCERTAIN' });
   });
   it('retains a pushed event when the durable inbox is at capacity until space is available', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-inbox-capacity-')); const statePath = path.join(root, 'data', 'qq-state.json'); const at = '2026-08-27T10:00:00.000Z';
-    const inbound = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`pending-${index}`, { status: 'pending', owner: 'other-owner', leaseUntil: '2026-08-27T10:30:00.000Z', trigger: { type: 'user_message', sessionId: 'qq:u-1', text: `pending-${index}`, at } }]));
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-inbox-capacity-')); const statePath = path.join(root, 'data', 'qq-state.json'); const at = '2026-08-27T10:00:00.000Z'; const base = Date.parse(at); const started = Date.now(); const now = () => new Date(base + Date.now() - started).toISOString();
+    const inbound = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`pending-${index}`, { status: 'pending', owner: 'other-owner', leaseUntil: index === 0 ? '2026-08-27T10:00:00.040Z' : '2026-08-27T10:30:00.000Z', trigger: { type: 'user_message', sessionId: 'qq:u-1', text: `pending-${index}`, at } }]));
     await mkdir(path.dirname(statePath), { recursive: true }); await writeFile(statePath, JSON.stringify({ binding: { peerId: 'u-1', context: 'private' }, outbound: {}, inbound }));
-    const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, () => at); const event = { peerId: 'u-1', context: 'private' as const, messageId: 'retained-push', text: 'retain me', at };
-    port.pushInbound(event); await expect(port.receiveEnvelope()).resolves.toBeNull();
-    const current = JSON.parse(await readFile(statePath, 'utf8')) as { inbound: Record<string, unknown> }; delete current.inbound['pending-0']; await writeFile(statePath, JSON.stringify(current));
+    const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, now); const event = { peerId: 'u-1', context: 'private' as const, messageId: 'retained-push', text: 'retain me', at };
+    port.pushInbound(event); await expect(port.receiveEnvelope()).resolves.toMatchObject({ messageId: 'pending-0' }); await port.completeInbound('pending-0');
     await expect(port.receiveEnvelope()).resolves.toMatchObject({ messageId: 'retained-push' });
   });
   it('fails closed with an actionable error for payloadless legacy inbound records', async () => {
@@ -149,6 +148,6 @@ describe('QQ durable binding and outbound ledger', () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-outbound-bounds-')); const statePath = path.join(root, 'data', 'qq-state.json'); let returns = 0;
     const inbound: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: async () => await new Promise<IteratorResult<never>>(() => undefined), return: async () => { returns += 1; return { done: true, value: undefined }; } }) };
     const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, undefined, inbound);
-    await expect(port.send({ occurrenceId: 'o', idempotencyKey: 'k', text: 'x'.repeat(4097), background: false })).rejects.toThrow(); await port.close(); await port.close(); expect(returns).toBe(1);
+    await expect(port.send({ occurrenceId: 'o', idempotencyKey: 'k', text: 'x'.repeat(4097), background: false })).rejects.toThrow(); await expect(port.send({ occurrenceId: 'o', idempotencyKey: 'k', text: 'bad\u0000text', background: false })).rejects.toThrow(); await port.close(); await port.close(); expect(returns).toBe(1);
   });
 });

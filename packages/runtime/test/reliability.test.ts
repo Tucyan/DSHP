@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DemoModel } from '../src/demo-model.js';
-import { createRuntime } from '../src/runtime.js';
+import { createLiveRuntime, createRuntime } from '../src/runtime.js';
 
 class ChangingModel extends DemoModel {
   calls = 0;
@@ -74,5 +74,14 @@ describe('runtime processing durability', () => {
     const runtimes = await Promise.all([root1, root2].map((root) => createRuntime({ repoRoot: root, peerId: 'peer-1' })));
     for (const runtime of runtimes) { const qq = runtime.qq as typeof runtime.qq & { receiveEnvelope?: unknown }; qq.receiveEnvelope = undefined; qq.receive = async () => deliveries++ < 2 ? event : null; qq.claimInbound = async (messageId) => { if (claims.has(messageId)) return 'pending'; claims.add(messageId); return 'claimed'; }; qq.completeInbound = async () => undefined; }
     const results = await Promise.all(runtimes.map((runtime) => runtime.processNext())); expect(results.filter(Boolean)).toHaveLength(1); expect(claims.size).toBe(1);
+  });
+  it('keeps the runtime inbound worker alive while a full inbox waits for capacity', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-inbox-backpressure-runtime-')); const at = '2026-08-27T10:00:00.000Z'; const base = Date.parse(at); const started = Date.now(); const now = () => new Date(base + Date.now() - started).toISOString(); const sent: string[] = [];
+    async function* stream() { yield { peerId: 'peer-1', context: 'private' as const, messageId: 'retained-stream', text: 'stream message', at }; }
+    const runtime = await createLiveRuntime({ repoRoot: root, peerId: 'peer-1', now, model: new DemoModel(), goalPort: { getCurrentGoal: () => undefined }, transport: { sendPrivate: async (_peer, text) => { sent.push(text); } }, inbound: stream(), scheduleTool: { create: async () => ({ id: 'schedule-1' }), list: async () => [], delete: async () => true } });
+    const inbound = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`pending-${index}`, { status: 'pending', owner: 'other-owner', leaseUntil: '2026-08-27T10:00:00.100Z', trigger: { type: 'user_message', sessionId: 'qq:peer-1', text: `pending-${index}`, at } }]));
+    await writeFile(path.join(runtime.paths.storage, 'qq-binding.json'), JSON.stringify({ binding: { peerId: 'peer-1', context: 'private' }, outbound: {}, inbound }));
+    const running = runtime.start(); const deadline = Date.now() + 4_000; while (sent.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); await runtime.stop(); await running;
+    expect(sent).toHaveLength(2);
   });
 });

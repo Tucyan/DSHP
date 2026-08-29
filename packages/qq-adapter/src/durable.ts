@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 const TimestampSchema = z.string().datetime({ offset: true }).refine((value) => { const epoch = Date.parse(value); return Number.isFinite(epoch) && epoch >= Date.UTC(2000, 0, 1) && epoch <= Date.UTC(2100, 0, 1); }, 'timestamp is outside supported range');
 const MessageIdSchema = z.string().min(1).max(256).refine((value) => !hasControlCharacter(value), 'messageId contains a control character');
-const InboundTriggerSchema = z.object({ type: z.literal('user_message'), sessionId: z.string().min(1).max(256), text: z.string().min(1).max(4096), at: TimestampSchema }).strict();
+const InboundTriggerSchema = z.object({ type: z.literal('user_message'), sessionId: z.string().min(1).max(256).refine((value) => !hasControlCharacter(value), 'sessionId contains a control character'), text: z.string().min(1).max(4096), at: TimestampSchema }).strict();
 export type DurableInboundTrigger = z.infer<typeof InboundTriggerSchema>;
 export interface DurableInboundEnvelope { messageId: string; trigger: DurableInboundTrigger; }
 const BindingSchema = z.object({ peerId: z.string().min(1).max(256), context: z.literal('private') }).strict();

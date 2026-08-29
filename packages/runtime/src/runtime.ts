@@ -13,13 +13,16 @@ import { DemoModel } from './demo-model.js';
 import { ExtensionWriter } from './extension-writer.js';
 
 const RuntimeTimestampSchema = z.string().datetime({ offset: true }).refine((value) => { const epoch = Date.parse(value); return Number.isFinite(epoch) && epoch >= Date.UTC(2000, 0, 1) && epoch <= Date.UTC(2100, 0, 1); }, 'timestamp is outside supported range');
+const RuntimeKeySchema = z.string().min(1).max(256).refine((value) => !hasControlCharacter(value), 'identifier contains a control character');
+const RuntimeTextSchema = z.string().min(1).max(4096).refine((value) => !hasControlCharacter(value), 'text contains a control character');
 const RuntimeConversationEventSchema = ConversationEventSchema.extend({ at: RuntimeTimestampSchema });
-const ProcessingEntrySchema = z.object({ messageId: z.string().min(1).max(256), sessionId: z.string().min(1).max(256), text: z.string().min(1).max(4096), at: RuntimeTimestampSchema, userSeq: z.number().int().positive().max(1_000_000), assistantSeq: z.number().int().positive().max(1_000_000), status: z.enum(['pending', 'completed']), action: AgentActionSchema.optional() }).strict();
+const ProcessingEntrySchema = z.object({ messageId: RuntimeKeySchema, sessionId: RuntimeKeySchema, text: RuntimeTextSchema, at: RuntimeTimestampSchema, userSeq: z.number().int().positive().max(1_000_000), assistantSeq: z.number().int().positive().max(1_000_000), status: z.enum(['pending', 'completed']), action: AgentActionSchema.optional() }).strict();
 const ConversationStateSchema = z.object({
-  next: z.record(z.string().min(1).max(256), z.number().int().nonnegative().max(1_000_000)).refine((value) => Object.keys(value).length <= 1_000, 'conversation session state is too large'),
-  entries: z.record(ProcessingEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'conversation journal is too large').default({}),
+  next: z.record(RuntimeKeySchema, z.number().int().nonnegative().max(1_000_000)).refine((value) => Object.keys(value).length <= 1_000, 'conversation session state is too large'),
+  entries: z.record(RuntimeKeySchema, ProcessingEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'conversation journal is too large').default({}),
 }).strict();
-const DispatchStateSchema = z.object({ dispatched: z.record(z.object({ at: RuntimeTimestampSchema, status: z.enum(['pending', 'completed']), owner: z.string().min(1).max(256).optional(), leaseUntil: RuntimeTimestampSchema.optional(), action: AgentActionSchema.optional() }).strict()).refine((value) => Object.keys(value).length <= 10_000, 'dispatch ledger is too large') }).strict();
+const DispatchStateSchema = z.object({ dispatched: z.record(RuntimeKeySchema, z.object({ at: RuntimeTimestampSchema, status: z.enum(['pending', 'completed']), owner: RuntimeKeySchema.optional(), leaseUntil: RuntimeTimestampSchema.optional(), action: AgentActionSchema.optional() }).strict()).refine((value) => Object.keys(value).length <= 10_000, 'dispatch ledger is too large') }).strict();
+const RuntimeScheduleBindingSchema = z.object({ id: RuntimeKeySchema, sessionId: RuntimeKeySchema, prompt: RuntimeTextSchema, kind: z.enum(['once', 'interval']), at: RuntimeTimestampSchema, everySeconds: z.number().int().min(300).max(31_536_000).optional(), idempotencyKey: RuntimeKeySchema, status: z.enum(['scheduled', 'overdue', 'pending']), createdAt: RuntimeTimestampSchema }).strict();
 const RuntimeTraceEvents = new Set(['action.accepted', 'action.rejected', 'qq.inbound', 'qq.outbound', 'memory.consolidate', 'memory.apply', 'heartbeat.foreground', 'heartbeat.background', 'schedule.dispatch', 'skill.created', 'plugin.proposed']);
 type DeliveryScope = { messageId?: string; stableKey?: string; effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> };
 type LeaseGuard = { check: () => void; stop: () => void };
@@ -32,7 +35,7 @@ export interface LiveRuntimeOptions extends RuntimeOptions { model: RuntimeModel
 export interface RuntimeSchedulePort extends DshSchedulePort { recover?: (at: string) => Promise<ScheduleBinding[]>; reconcilePending?: (key: string, resolution: PendingScheduleResolution) => Promise<ScheduleBinding | null>; }
 export interface ProcessResult { trigger: AgentTrigger; action: AgentAction; }
 export interface RuntimeInboundEnvelope { trigger: AgentTrigger; messageId: string; }
-export interface RuntimeQq extends QqPort { readonly outbox: QqOutbound[]; pushInbound(event: QqInbound): void; /** Stop inbound consumption; outbound sends remain available while active work drains. */ close?(): Promise<void>; receiveEnvelope?(): Promise<RuntimeInboundEnvelope | null>; claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>; renewInbound?(messageId: string): Promise<void>; completeInbound?(messageId: string): Promise<void>; failInbound?(messageId: string): Promise<void>; }
+export interface RuntimeQq extends QqPort { readonly outbox: QqOutbound[]; pushInbound(event: QqInbound): boolean; /** Stop inbound consumption; outbound sends remain available while active work drains. */ close?(): Promise<void>; /** Production QQ adapters must provide receiveEnvelope for durable payload/ack semantics. receive is a test-only replay fallback and is claimed before processing. */ receiveEnvelope?(): Promise<RuntimeInboundEnvelope | null>; claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>; renewInbound?(messageId: string): Promise<void>; completeInbound?(messageId: string): Promise<void>; failInbound?(messageId: string): Promise<void>; }
 
 export class PersonalGrowthRuntime {
   readonly paths: BootstrappedRuntime['paths'];
@@ -104,12 +107,13 @@ export class PersonalGrowthRuntime {
   private async processNextNow(): Promise<ProcessResult | null> {
     while (true) {
       const legacyReceive = !this.qq.receiveEnvelope;
-      const envelope = legacyReceive ? await this.qq.receive().then(async (trigger) => {
-        if (!trigger) return null;
+      let envelope: RuntimeInboundEnvelope | null;
+      if (legacyReceive) {
+        const trigger = await this.qq.receive(); if (!trigger) return null;
         const messageId = `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}`;
-        if (this.qq.claimInbound && await this.qq.claimInbound(messageId) !== 'claimed') return null;
-        return { trigger, messageId };
-      }) : await this.qq.receiveEnvelope!();
+        if (this.qq.claimInbound && await this.qq.claimInbound(messageId) !== 'claimed') continue;
+        envelope = { trigger, messageId };
+      } else envelope = await this.qq.receiveEnvelope!();
       if (!envelope) return null;
       const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
       try {
@@ -196,7 +200,7 @@ export class PersonalGrowthRuntime {
   async reconcileQqInbound(messageId: string, outcome: 'retry' | 'completed'): Promise<void> { if (outcome === 'completed') { if (!this.qq.completeInbound) throw new Error('QQ adapter does not expose inbound reconciliation'); await this.qq.completeInbound(messageId); return; } if (!this.qq.failInbound) throw new Error('QQ adapter does not expose inbound reconciliation'); await this.qq.failInbound(messageId); }
   async dispatchDue(at = this.now()): Promise<ProcessResult[]> {
     const parsedAt = RuntimeTimestampSchema.parse(at); if (this.schedules.recover) await this.schedules.recover(parsedAt);
-    const bindings = await this.schedules.list(this.sessionId); const results: ProcessResult[] = []; const nowEpoch = Date.parse(parsedAt);
+    const bindings = (await this.schedules.list(this.sessionId)).map((binding) => RuntimeScheduleBindingSchema.parse(binding)); const results: ProcessResult[] = []; const nowEpoch = Date.parse(parsedAt);
     for (const binding of bindings) {
       RuntimeTimestampSchema.parse(binding.at);
       if (binding.status === 'pending') continue;
@@ -301,7 +305,7 @@ export async function createLiveRuntime(options: LiveRuntimeOptions): Promise<Pe
 class LiveQqRuntimePort implements RuntimeQq {
   readonly outbox: QqOutbound[] = [];
   constructor(private readonly official: DurableQqPort) {}
-  pushInbound(event: QqInbound): void { void event; throw new Error('live QQ inbound is owned by the official Tencent stream'); }
+  pushInbound(event: QqInbound): boolean { void event; throw new Error('live QQ inbound is owned by the official Tencent stream'); }
   receive(): Promise<AgentTrigger | null> { return this.official.receive(); }
   async receiveEnvelope(): Promise<RuntimeInboundEnvelope | null> { const envelope = await this.official.receiveEnvelope(); return envelope; }
   claimInbound(messageId: string): Promise<'claimed' | 'completed' | 'pending'> { return this.official.claimInbound(messageId); }
@@ -315,9 +319,11 @@ class LiveQqRuntimePort implements RuntimeQq {
 async function readText(filePath: string): Promise<string> { try { return await (await import('node:fs/promises')).readFile(filePath, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
 function validateRuntimeTrigger(input: unknown): AgentTrigger {
   const trigger = AgentTriggerSchema.parse(input); RuntimeTimestampSchema.parse(trigger.at);
-  if (trigger.type === 'user_message') { z.string().max(256).parse(trigger.sessionId); z.string().max(4096).parse(trigger.text); }
-  if (trigger.type === 'schedule') { z.string().max(256).parse(trigger.scheduleId); z.string().max(4096).parse(trigger.prompt); }
-  if (trigger.type === 'foreground_heartbeat' || trigger.type === 'background_heartbeat') z.string().max(256).parse(trigger.occurrenceId);
+  if (trigger.type === 'user_message') { RuntimeKeySchema.parse(trigger.sessionId); RuntimeTextSchema.parse(trigger.text); }
+  if (trigger.type === 'schedule') { RuntimeKeySchema.parse(trigger.scheduleId); RuntimeTextSchema.parse(trigger.prompt); }
+  if (trigger.type === 'foreground_heartbeat' || trigger.type === 'background_heartbeat') RuntimeKeySchema.parse(trigger.occurrenceId);
+  if (trigger.type === 'system') RuntimeTextSchema.parse(trigger.reason);
   return trigger;
 }
+function hasControlCharacter(value: string): boolean { for (const character of value) { const code = character.charCodeAt(0); if (code < 32 || code === 127) return true; } return false; }
 function safeOccurrenceFileName(value: string): string { const normalized = value.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/-+/gu, '-').replace(/^[.-]+|[.-]+$/gu, '').slice(0, 160) || 'occurrence'; const digest = createHash('sha256').update(value).digest('hex').slice(0, 12); return `${normalized}-${digest}`; }

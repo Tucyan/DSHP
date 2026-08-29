@@ -3,12 +3,15 @@ import type { QqConfig } from './config.js';
 import { SingleUserQqGate, type QqInbound } from './gate.js';
 import { z } from 'zod';
 
-export const QqOutboundSchema = z.object({ occurrenceId: z.string().min(1).max(256), idempotencyKey: z.string().min(1).max(256), text: z.string().min(1).max(4096), background: z.boolean() }).strict();
+const MessageKeySchema = z.string().min(1).max(256).refine((value) => !hasControlCharacter(value), 'message key contains a control character');
+export const QqOutboundSchema = z.object({ occurrenceId: MessageKeySchema, idempotencyKey: MessageKeySchema, text: z.string().min(1).max(4096).refine((value) => !hasDisallowedTextControl(value), 'text contains a disallowed control character'), background: z.boolean() }).strict();
 export interface QqOutbound { occurrenceId: string; idempotencyKey: string; text: string; background: boolean; }
 export function validateQqOutbound(message: QqOutbound): QqOutbound { return QqOutboundSchema.parse(message); }
+function hasControlCharacter(value: string): boolean { for (const character of value) { const code = character.charCodeAt(0); if (code < 32 || code === 127) return true; } return false; }
+function hasDisallowedTextControl(value: string): boolean { for (const character of value) { const code = character.charCodeAt(0); if (code === 0 || (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) return true; } return false; }
 export interface QqPort { receive(): Promise<AgentTrigger | null>; send(message: QqOutbound): Promise<boolean>; }
 export interface QqTransport { sendPrivate(peerId: string, text: string): Promise<void>; }
-/** Thin deployment adapter around Tencent's transport. The QQ protocol remains owned by the official bundle. */
+/** Thin deployment adapter around Tencent's transport. The QQ protocol remains owned by the host integration. */
 export class TencentQqPort implements QqPort {
   private readonly gate: SingleUserQqGate;
   private readonly sent = new Set<string>();

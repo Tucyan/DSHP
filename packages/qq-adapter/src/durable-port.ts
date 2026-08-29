@@ -20,18 +20,18 @@ export class DurableQqPort implements QqPort {
   constructor(private readonly config: QqConfig, private readonly transport: QqTransport, private readonly statePath: string, private readonly runtimeRoot: string, private readonly now: () => string = () => new Date().toISOString(), inboundStream?: AsyncIterable<QqInbound>) { this.gate = new SingleUserQqGate(config, now); this.inboundIterator = inboundStream?.[Symbol.asyncIterator](); }
   private async initialize(): Promise<void> { this.store = await QqDurableStateStore.open(this.statePath, this.runtimeRoot, this.now); const binding = this.store.binding(); if (binding && binding.peerId !== this.config.peerId) throw new Error('persisted QQ binding does not match configured peer'); await this.store.bind(this.config.peerId); }
   async ready(): Promise<void> { this.init ??= this.initialize(); await this.init; }
-  pushInbound(event: QqInbound): void { this.inbound.push(event); }
+  pushInbound(event: QqInbound): boolean { if (this.closed || this.retainedInbound || this.inbound.length >= 1_000) return false; this.inbound.push(event); return true; }
   async receive(): Promise<AgentTrigger | null> {
     const envelope = await this.receiveEnvelope(); return envelope?.trigger ?? null;
   }
   async receiveEnvelope(): Promise<QqInboundEnvelope | null> {
     if (this.closed) return null;
-    if (this.retainedInbound) { const retained = await this.persistInbound(this.retainedInbound); if (retained) { this.retainedInbound = undefined; return retained; } return null; }
+    if (this.retainedInbound) { try { const retained = await this.persistInbound(this.retainedInbound); this.retainedInbound = undefined; if (retained) return retained; return await this.waitForCapacity(); } catch (error) { if (!isCapacityError(error)) throw error; return await this.waitForCapacity(); } }
     if (this.store) { const restored = await this.store.claimNextInbound(); if (restored) return restored; }
     else { try { await access(this.statePath); await this.ready(); const restored = await this.store!.claimNextInbound(); if (restored) return restored; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
-    if (this.inboundIterator) { while (!this.closed) { const next = await this.nextStreamOrLease(); if (next.recovered) return next.recovered; if (next.leaseExpired) return this.store ? await this.store.claimNextInbound() : null; if (next.done) { const recovered = await this.recoverAfterStreamDone(); if (recovered) return recovered; return null; } const event = next.value; const trigger = this.gate.accept(event); if (trigger?.type === 'user_message') { const envelope = await this.persistInbound(event); if (envelope) return envelope; this.retainedInbound = event; return null; } } return null; }
+    if (this.inboundIterator) { while (!this.closed) { const next = await this.nextStreamOrLease(); if (next.recovered) return next.recovered; if (next.leaseExpired) return this.store ? await this.store.claimNextInbound() : null; if (next.done) { const recovered = await this.recoverAfterStreamDone(); if (recovered) return recovered; return null; } const event = next.value; const trigger = this.gate.accept(event); if (trigger?.type === 'user_message') { try { const envelope = await this.persistInbound(event); if (envelope) return envelope; } catch (error) { if (!isCapacityError(error)) throw error; this.retainedInbound = event; return await this.waitForCapacity(); } } } return null; }
     while (!this.closed) {
-      while (this.inbound.length) { const event = this.inbound[0]!; const trigger = this.gate.accept(event); if (!trigger) { this.inbound.shift(); continue; } const envelope = await this.persistInbound(event); if (envelope) { this.inbound.shift(); return envelope; } return null; }
+      while (this.inbound.length) { const event = this.inbound[0]!; const trigger = this.gate.accept(event); if (!trigger) { this.inbound.shift(); continue; } try { const envelope = await this.persistInbound(event); this.inbound.shift(); if (envelope) return envelope; } catch (error) { if (!isCapacityError(error)) throw error; return await this.waitForCapacity(); } }
       if (!this.store) return null;
       const waitMs = await this.store.inboundRetryAfterMs();
       if (waitMs === undefined) {
@@ -70,7 +70,9 @@ export class DurableQqPort implements QqPort {
       this.retryWaiters.add(cancel);
     });
   }
-  private async persistInbound(event: QqInbound): Promise<QqInboundEnvelope | null> { const trigger = this.gate.accept(event); if (trigger?.type !== 'user_message') return null; await this.ready(); try { await this.store!.enqueueInbound(event.messageId, trigger); return await this.store!.claimNextInbound(); } catch (error) { if (error instanceof QqDurableStateError && error.code === 'INBOUND_CAPACITY') return null; throw error; } }
+  private async persistInbound(event: QqInbound): Promise<QqInboundEnvelope | null> { const trigger = this.gate.accept(event); if (trigger?.type !== 'user_message') return null; await this.ready(); await this.store!.enqueueInbound(event.messageId, trigger); return await this.store!.claimNextInbound(); }
+  private async waitForCapacity(): Promise<QqInboundEnvelope | null> { while (!this.closed && this.store) { const recovered = await this.store.claimNextInbound(); if (recovered) return recovered; const waitMs = await this.store.inboundRetryAfterMs(); if (waitMs === undefined) return null; await this.waitForRetry(waitMs); } return null; }
   private async recoverAfterStreamDone(): Promise<QqInboundEnvelope | null> { while (!this.closed && this.store) { const recovered = await this.store.claimNextInbound(); if (recovered) return recovered; const waitMs = await this.store.inboundRetryAfterMs(); if (waitMs === undefined) return null; await this.waitForRetry(waitMs); } return null; }
   async close(): Promise<void> { this.closePromise ??= (async () => { this.closed = true; for (const cancel of this.retryWaiters) cancel(); await this.inboundIterator?.return?.(); })(); await this.closePromise; }
 }
+function isCapacityError(error: unknown): boolean { return error instanceof QqDurableStateError && error.code === 'INBOUND_CAPACITY'; }
