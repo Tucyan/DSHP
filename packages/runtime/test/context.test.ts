@@ -29,7 +29,7 @@ describe('runtime context composition', () => {
   it('uses a bounded fixed retrieval for heartbeat context instead of an empty query', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-heartbeat-context-')); const model = new InspectingModel();
     const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', model, now: () => '2026-08-27T10:00:00.000Z' });
-    await runtime.memory.rememberExplicit({ path: 'priorities/current.md', summary: 'Current priority', content: 'Long-term growth priority is finishing the study milestone.', importance: 'high', frequency: 'high' });
+    await runtime.memory.rememberExplicit({ path: 'contexts/current-priority.md', summary: 'Current priority', content: 'Long-term growth priority is finishing the study milestone.', importance: 'high', frequency: 'high' });
     await runtime.runBackground('background-context');
     expect(model.context?.sections.memories?.join('\n')).toContain('Current priority');
   });
