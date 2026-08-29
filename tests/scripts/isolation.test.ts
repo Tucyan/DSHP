@@ -53,9 +53,9 @@ describe('runtime launcher isolation', () => {
     expect(launcher).toContain('--patch');
     expect(launcher).toContain('qq-disabled.patch.yml');
     expect(launcher).toContain('QQ_PEER_ID');
-    expect(launcher).toContain('managed QQ profile binding mismatch');
+    expect(launcher).not.toContain('managed QQ profile binding mismatch');
     expect(launcher).toMatch(/exec dsh web --patch \$disabledPatch/);
-    expect(launcher.indexOf('managed QQ profile binding mismatch')).toBeLessThan(launcher.indexOf('& corepack'));
+    expect(launcher).toContain('packages/dsh-host/dist/cli.js');
     const disabledPatch = readFileSync(path.resolve('config/qq-disabled.patch.yml'), 'utf8');
     expect(disabledPatch).toContain('id: im-qqbot');
     expect(disabledPatch).toContain('disabled: true');
