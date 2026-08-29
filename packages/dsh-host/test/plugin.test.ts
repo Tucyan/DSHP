@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertRequiredAgentTools, createDshAgentRegistry, resolveDefaultAgentOptions, createBackgroundAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
+import { assertRequiredAgentTools, createDshAgentRegistry, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
 
 describe('production DSH host adapter', () => {
   it('fails closed when the public agent tool surface is incomplete', () => {
@@ -35,9 +35,30 @@ describe('production DSH host adapter', () => {
     expect(() => resolveDefaultAgentOptions({} as never)).toThrow(/default model/)
   })
 
+  it('disposes an agent when capabilities remain unavailable by the deadline', async () => {
+    let disposed = 0
+    const ctx = {
+      sessionPersistence: { async listSnapshots() { return [{ header: { id: 'capability-test' } }] } },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+      agents: {
+        async resume() { return { agent: { id: 'capability-test', ctx: { tools: { schemas: () => [] } } }, async dispose() { disposed++ } } },
+        async create() { throw new Error('must not create') },
+      },
+    }
+    const registry = createDshAgentRegistry(ctx as never, undefined, () => assertRequiredAgentTools([]))
+    await expect(registry.resume({ sessionId: 'capability-test' })).rejects.toThrow(/schedule_create/)
+    expect(disposed).toBe(1)
+  })
+
   it('restricts the hidden maintenance agent at unpublished setup time', () => {
     const calls: unknown[] = []
     createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
     expect(calls).toEqual([{ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] }])
+  })
+
+  it('restricts decision and Dream agents to read-only skill lookup', () => {
+    const calls: unknown[] = []
+    createReadOnlyHiddenAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
+    expect(calls).toEqual([{ allow: ['skill'] }])
   })
 })

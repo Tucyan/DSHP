@@ -52,18 +52,30 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('rejects sequence overflow before persisting the increment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-seq-'))
+    try {
+      const file = join(root, 'bridge.json')
+      await writeFile(file, JSON.stringify({ inbound: {}, outbound: [], sequences: { s: 1000000 }, histories: {}, traces: [] }))
+      await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/sequence|bound/i)
+      expect(JSON.parse(await readFile(file, 'utf8')).sequences.s).toBe(1000000)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('uses durable outbound pending and sent states with explicit reconcile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
     try {
       const file = join(root, 'bridge.json')
       const first = new FileBridgeState(file)
       const second = new FileBridgeState(file)
-      expect(await first.claimOutbound('o1')).toBe('claimed')
+      const payload = { target: { peerId: 'peer-1', messageId: 'msg-1' }, text: 'pending text' }
+      expect(await first.claimOutbound('o1', payload)).toBe('claimed')
+      expect(await first.listPendingOutbound()).toEqual([{ key: 'o1', ...payload }])
       expect(await second.claimOutbound('o1')).toBe('pending')
       await first.markOutboundUnknown('o1')
       expect(await second.claimOutbound('o1')).toBe('unknown')
       await second.reconcileOutbound('o1', 'retry')
-      expect(await second.claimOutbound('o1')).toBe('claimed')
+      expect(await second.claimOutbound('o1', payload)).toBe('claimed')
       await second.completeOutbound('o1')
       expect(await first.claimOutbound('o1')).toBe('sent')
     } finally { await rm(root, { recursive: true, force: true }) }

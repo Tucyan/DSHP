@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, parse, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
-import type { BridgeState } from './bridge.js'
+import { randomUUID, createHash } from 'node:crypto'
+import type { BridgeState, OutboundEnvelope } from './bridge.js'
 
 const MAX_ENTRIES = 10_000
 const MAX_ID = 512
@@ -10,7 +10,7 @@ const MAX_TRACES = 1_000
 interface TraceRecord { type: string; at: string; key?: string; status?: string; reason?: string }
 type InboundRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string }
 type HistoryRecordState = InboundRecord
-type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string }
+type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string; target?: { peerId: string; messageId?: string }; text?: string }
 interface StateFile { inbound: Record<string, InboundRecord>; outbound: Record<string, OutboundRecord>; sequences: Record<string, number>; histories: Record<string, HistoryRecordState>; traces: TraceRecord[] }
 export type OutboundClaim = 'claimed' | 'sent' | 'pending' | 'unknown'
 interface LockOwner { token: string; pid: number; leaseUntil: string }
@@ -21,15 +21,23 @@ function strictObject(value: unknown, allowed: readonly string[]): Record<string
   return result
 }
 function parseLease(value: unknown): OutboundRecord {
-  const object = strictObject(value, ['status', 'owner', 'leaseUntil'])
+  const object = strictObject(value, ['status', 'owner', 'leaseUntil', 'target', 'text'])
   if (!['pending', 'sent', 'unknown'].includes(String(object.status))) throw new Error('Malformed outbound state')
   validateLeaseFields(object)
-  return object as OutboundRecord
+  if ((object.status === 'pending' || object.status === 'unknown') && (typeof object.owner !== 'string' || typeof object.leaseUntil !== 'string')) throw new Error('Outbound lease metadata is required')
+  if (object.text !== undefined && (typeof object.text !== 'string' || object.text.length < 1 || object.text.length > 20_000)) throw new Error('Malformed outbound payload')
+  if (object.target !== undefined) {
+    const target = strictObject(object.target, ['peerId', 'messageId'])
+    if (typeof target.peerId !== 'string' || target.peerId.length < 1 || target.peerId.length > MAX_ID || (target.messageId !== undefined && (typeof target.messageId !== 'string' || target.messageId.length > MAX_ID))) throw new Error('Malformed outbound target')
+  }
+  if ((object.status === 'pending' || object.status === 'unknown') && (!object.target || typeof object.text !== 'string' || !object.text)) throw new Error('Outbound payload is required for pending/unknown state')
+  return object as unknown as OutboundRecord
 }
 function parseInbound(value: unknown): InboundRecord {
   const object = strictObject(value, ['status', 'owner', 'leaseUntil'])
   if (object.status !== 'pending' && object.status !== 'completed') throw new Error('Malformed inbound state')
   validateLeaseFields(object)
+  if (object.status === 'pending' && (typeof object.owner !== 'string' || typeof object.leaseUntil !== 'string')) throw new Error('Inbound lease metadata is required')
   return object as InboundRecord
 }
 function validateLeaseFields(object: Record<string, unknown>): void {
@@ -43,7 +51,7 @@ function parseTrace(value: unknown): TraceRecord {
 }
 function parseLockOwner(value: unknown): LockOwner {
   const object = strictObject(value, ['token', 'pid', 'leaseUntil'])
-  if (typeof object.token !== 'string' || !/^[0-9a-f-]{36}$/i.test(object.token) || typeof object.pid !== 'number' || !Number.isInteger(object.pid) || object.pid < 1 || typeof object.leaseUntil !== 'string') throw new Error('Malformed lock owner')
+  if (typeof object.token !== 'string' || !/^[0-9a-f-]{36}$/i.test(object.token) || typeof object.pid !== 'number' || !Number.isInteger(object.pid) || object.pid < 1 || typeof object.leaseUntil !== 'string' || !Number.isFinite(Date.parse(object.leaseUntil))) throw new Error('Malformed lock owner')
   return object as unknown as LockOwner
 }
 
@@ -77,18 +85,22 @@ export class FileBridgeState implements BridgeState {
   }
 
   completeInbound(messageId: string): Promise<void> {
+    this.assertId(messageId)
     return this.update(state => {
       const record = state.inbound[messageId]
+      if (!record) throw new Error('bridge inbound claim is missing')
       if (record?.owner !== this.owner && record?.status === 'pending') throw new Error('bridge inbound ownership lost')
       state.inbound[messageId] = { status: 'completed' }
     })
   }
 
   failInbound(messageId: string): Promise<void> {
+    this.assertId(messageId)
     return this.update(state => { const record = state.inbound[messageId]; if (record?.owner === this.owner) delete state.inbound[messageId] })
   }
 
   claimHistory(historyId: string): Promise<boolean> {
+    this.assertId(historyId)
     return this.update(state => {
       const record = state.histories[historyId]
       if (record?.status === 'completed') return false
@@ -100,14 +112,17 @@ export class FileBridgeState implements BridgeState {
   }
 
   completeHistory(historyId: string): Promise<void> {
+    this.assertId(historyId)
     return this.update(state => {
       const record = state.histories[historyId]
+      if (!record) throw new Error('history claim is missing')
       if (record?.owner !== this.owner && record?.status === 'pending') throw new Error('history ownership lost')
       state.histories[historyId] = { status: 'completed' }
     })
   }
 
   renewHistory(historyId: string): Promise<void> {
+    this.assertId(historyId)
     return this.update(state => {
       const record = state.histories[historyId]
       if (record?.status !== 'pending' || record.owner !== this.owner) throw new Error('history ownership lost')
@@ -116,57 +131,79 @@ export class FileBridgeState implements BridgeState {
   }
 
   failHistory(historyId: string): Promise<void> {
+    this.assertId(historyId)
     return this.update(state => { if (state.histories[historyId]?.owner === this.owner) delete state.histories[historyId] })
   }
 
   trace(record: TraceRecord): Promise<void> {
     if (!record.type || record.type.length > 64 || !record.at || (record.key && record.key.length > MAX_ID) || (record.reason && record.reason.length > 256)) throw new Error('Malformed bridge trace')
-    const parsed = { ...record, key: record.key?.slice(0, MAX_ID), reason: record.reason?.slice(0, 256) }
+    const parsed = { ...record, key: record.key ? createHash('sha256').update(record.key, 'utf8').digest('hex').slice(0, 16) : undefined, reason: record.reason?.slice(0, 256) }
     return this.update(state => { state.traces.push(parsed); if (state.traces.length > MAX_TRACES) state.traces.splice(0, state.traces.length - MAX_TRACES) })
   }
 
   nextSequence(sessionId: string): Promise<number> {
-    return this.update(state => { const next = (state.sequences[sessionId] ?? 0) + 1; state.sequences[sessionId] = next; return next })
+    this.assertId(sessionId)
+    return this.update(state => { const next = (state.sequences[sessionId] ?? 0) + 1; if (next > MAX_SEQ) throw new Error('bridge sequence exceeds bounds'); state.sequences[sessionId] = next; return next })
   }
 
   acceptOutbound(key: string): Promise<boolean> {
     return this.claimOutbound(key).then(result => result === 'claimed')
   }
 
-  claimOutbound(key: string): Promise<OutboundClaim> {
+  claimOutbound(key: string, envelope?: OutboundEnvelope): Promise<OutboundClaim> {
     this.assertId(key)
+    if (envelope) this.assertEnvelope(envelope)
     return this.update(state => {
       const current = state.outbound[key]
       if (current?.status === 'sent') return 'sent'
       if (current?.status === 'unknown') return 'unknown'
       const now = Date.now()
       if (current?.status === 'pending' && current.owner !== this.owner && current.leaseUntil && Date.parse(current.leaseUntil) > now) return 'pending'
-      state.outbound[key] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString() }
+      if (!envelope && !current?.target) throw new Error('Outbound payload is required')
+      state.outbound[key] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString(), target: envelope?.target ?? current?.target, text: envelope?.text ?? current?.text }
       return 'claimed'
     })
   }
 
-  completeOutbound(key: string): Promise<void> {
+  listPendingOutbound(): Promise<Array<{ key: string } & OutboundEnvelope>> {
+    return this.update(state => Object.entries(state.outbound).filter(([, value]) => value.status === 'pending' && value.target && value.text).map(([key, value]) => ({ key, target: value.target!, text: value.text! })))
+  }
+
+  markOutboundDispatched(key: string): Promise<void> {
+    this.assertId(key)
     return this.update(state => {
       const current = state.outbound[key]
-      if (current?.status === 'pending' && current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
+      if (current?.status !== 'pending' || current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
+      state.outbound[key] = { ...current, status: 'unknown' }
+    })
+  }
+
+  completeOutbound(key: string): Promise<void> {
+    this.assertId(key)
+    return this.update(state => {
+      const current = state.outbound[key]
+      if (!current) throw new Error('bridge outbound claim is missing')
+      if ((current?.status === 'pending' || current?.status === 'unknown') && current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
       state.outbound[key] = { status: 'sent' }
     })
   }
 
   markOutboundUnknown(key: string): Promise<void> {
+    this.assertId(key)
     return this.update(state => {
       const current = state.outbound[key]
-      if (current?.status === 'pending' && current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
-      state.outbound[key] = { status: 'unknown' }
+      if (!current) throw new Error('bridge outbound claim is missing')
+      if ((current?.status === 'pending' || current?.status === 'unknown') && current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
+      state.outbound[key] = { ...current, status: 'unknown' }
     })
   }
 
   reconcileOutbound(key: string, decision: 'retry' | 'sent'): Promise<void> {
+    this.assertId(key)
     return this.update(state => {
       const current = state.outbound[key]
       if (current?.status !== 'unknown') throw new Error('outbound reconciliation requires unknown outcome')
-      if (decision === 'retry') delete state.outbound[key]
+      if (decision === 'retry') state.outbound[key] = { ...current, status: 'pending', owner: this.owner, leaseUntil: new Date(Date.now() + this.lockTimeoutMs).toISOString() }
       else state.outbound[key] = { status: 'sent' }
     })
   }
@@ -231,6 +268,12 @@ export class FileBridgeState implements BridgeState {
 
   private assertId(value: string): void {
     if (typeof value !== 'string' || value.length < 1 || value.length > MAX_ID) throw new Error('bridge state id exceeds bounds')
+  }
+
+  private assertEnvelope(envelope: OutboundEnvelope): void {
+    if (!envelope || typeof envelope.text !== 'string' || envelope.text.length < 1 || envelope.text.length > 20_000) throw new Error('Outbound payload exceeds bounds')
+    this.assertId(envelope.target.peerId)
+    if (envelope.target.messageId !== undefined) this.assertId(envelope.target.messageId)
   }
 
   private async assertSafePath(): Promise<void> {

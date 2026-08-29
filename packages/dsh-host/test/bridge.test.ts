@@ -9,7 +9,7 @@ import {
   type BridgeMemory,
 } from '../src/bridge.js'
 import { FileBridgeState } from '../src/state.js'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -278,6 +278,22 @@ describe('PersonalGrowthBridge', () => {
       await bridge.start()
       await expect(bridge.observeAgentEvent({ sessionId: sessionIdForPeer('user-1'), seq: 7, type: 'assistant/message', text: '一次主动消息' })).rejects.toThrow(/unknown/)
       expect(await new FileBridgeState(join(root, 'bridge.json')).claimOutbound(`${sessionIdForPeer('user-1')}:7`)).toBe('unknown')
+      await bridge.stop()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('recovers an expired safe pending outbound on startup but never auto-sends unknown', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-recover-'))
+    try {
+      const stateFile = join(root, 'bridge.json')
+      await writeFile(stateFile, JSON.stringify({ inbound: {}, outbound: {
+        safe: { status: 'pending', owner: 'old-owner', leaseUntil: '2020-01-01T00:00:00.000Z', target: { peerId: 'user-1', messageId: 'm-safe' }, text: 'safe pending' },
+        uncertain: { status: 'unknown', owner: 'old-owner', leaseUntil: '2020-01-01T00:00:00.000Z', target: { peerId: 'user-1', messageId: 'm-uncertain' }, text: 'must reconcile' },
+      }, sequences: {}, histories: {}, traces: [] }))
+      const qq = bot()
+      const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: new FileBridgeState(stateFile), allowedPeerId: 'user-1' })
+      await bridge.start()
+      expect(qq.sent).toEqual(['safe pending'])
       await bridge.stop()
     } finally { await rm(root, { recursive: true, force: true }) }
   })

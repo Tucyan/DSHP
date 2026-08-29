@@ -25,6 +25,7 @@ export interface DshHostConfig {
   dream?: BridgeDream
   heartbeat?: BridgeHeartbeat
   heartbeatConfig?: Partial<HeartbeatConfig>
+  workspaceRoot?: string
   cadence?: { foregroundMs?: number; backgroundMs?: number }
   /** Injectable only for contract tests; deployment uses the public QQBot. */
   bot?: BridgeBot
@@ -185,6 +186,15 @@ export function createBackgroundAgentSetup(): (agentCtx: Context) => void {
   }
 }
 
+/** Decision and Dream agents receive only the read-only skill catalog. */
+export function createReadOnlyHiddenAgentSetup(): (agentCtx: Context) => void {
+  return (agentCtx: Context) => {
+    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
+    if (!tools?.restrict) throw new Error('personal-growth-dsh-host requires tool restriction for read-only hidden agent')
+    tools.restrict({ allow: ['skill'] })
+  }
+}
+
 export function assertRequiredAgentTools(available: readonly string[]): void {
   const missing = REQUIRED_AGENT_TOOLS.filter(name => !available.includes(name))
   if (missing.length) throw new Error(`personal-growth-dsh-host missing required DSH tools: ${missing.join(', ')}`)
@@ -287,8 +297,9 @@ export function createDshAgentRegistry(ctx: Context, tracker?: CompletionTracker
 async function waitForCapabilities(handle: AgentHandle, assertCapabilities?: (agent: Agent) => void): Promise<void> {
   if (!assertCapabilities) return
   let lastError: unknown
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try { assertCapabilities(handle.agent as Agent); return } catch (error) { lastError = error; await new Promise(resolve => setTimeout(resolve, 0)) }
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    try { assertCapabilities(handle.agent as Agent); return } catch (error) { lastError = error; await new Promise(resolve => setTimeout(resolve, 10)) }
   }
   throw lastError instanceof Error ? lastError : new Error('DSH agent capabilities unavailable')
 }
@@ -311,7 +322,7 @@ function hiddenSessionId(allowedPeerId: string, role: 'decision' | 'dream' | 'ma
 }
 
 function createBot(config: DshHostConfig): BridgeBot {
-  const qq = new QQBot({ appId: config.appId!, appSecret: config.appSecret!, accountId: config.accountId } satisfies QQBotOptions)
+  const qq = new QQBot({ appId: config.appId!, appSecret: config.appSecret!, accountId: config.accountId, transport: 'websocket' } satisfies QQBotOptions)
   return {
     onMessage(handler) {
       qq.on('message', async (_ctx, message) => handler(inbound(message)))
@@ -329,7 +340,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const appSecret = config?.appSecret ?? process.env.QQBOT_APP_SECRET
   const allowedPeerId = config?.allowedPeerId ?? process.env.QQBOT_ALLOWED_PEER_ID
   if (!appId || !appSecret || !allowedPeerId) throw new Error('personal-growth-dsh-host requires QQ credentials and allowedPeerId')
-  const workspaceRoot = process.env.PERSONAL_GROWTH_WORKSPACE ?? process.cwd()
+  const workspaceRoot = config.workspaceRoot ?? process.env.PERSONAL_GROWTH_WORKSPACE ?? process.cwd()
   const service = new MemoryService({
     workspaceRoot,
     compressor: { compress: events => events.map(event => `${event.role}: ${event.content}`).join(' | ') },
@@ -352,26 +363,18 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const tracker = completionTracker()
   const bridgeState = new FileBridgeState(resolve(workspaceRoot, '.personal-growth', 'bridge-state.json'))
-  const hiddenSessionIds = new Set<string>()
   const hiddenAgents = new Map<string, BridgeAgent>()
   const getHiddenAgent = async (role: 'decision' | 'dream' | 'maintenance'): Promise<BridgeAgent> => {
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
     if (existing) return existing
-    const setup = role === 'maintenance' ? createBackgroundAgentSetup() : (agentCtx: Context) => {
-      const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
-      if (!tools?.restrict) throw new Error(`personal-growth-dsh-host requires tool restriction for hidden ${role} agent`)
-      tools.restrict({ allow: role === 'dream' ? ['personal_memory_apply'] : ['skill'] })
-    }
+    const setup = role === 'maintenance' ? createBackgroundAgentSetup() : createReadOnlyHiddenAgentSetup()
     const agent = await openHiddenAgent(ctx, sessionId, tracker, setup)
-    hiddenSessionIds.add(agent.id)
-    hiddenSessionIds.add(sessionId)
     hiddenAgents.set(role, agent)
     return agent
   }
   const hiddenText = async (role: 'decision' | 'dream' | 'maintenance', prompt: string): Promise<string> => {
     const agent = await getHiddenAgent(role)
-    agent.inject({ text: prompt, source: 'personal-memory' })
     agent.followup({ text: prompt, source: 'heartbeat' })
     await agent.whenIdle()
     if (!agent.reply?.trim()) throw new Error(`hidden ${role} agent returned no completed text`)
@@ -400,24 +403,50 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
         const pending = []
-        for (const record of historyResult.records) {
-          const claimed = await bridgeState.claimHistory?.(record.id) ?? true
-          if (claimed) pending.push(record)
-        }
         const maintenanceProfile = await memory.readProfile()
         const maintenanceIndex = await memory.readIndex()
-        const maintenanceRelevant = await memory.search(pending.map(record => record.summary).join(' ') || 'capability gap skill improvement', 8)
-        for (const record of pending) {
-          const renewal = setInterval(() => { void bridgeState.renewHistory?.(record.id) }, 10_000)
+        const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
+        for (const record of historyResult.records) {
+          const claimed = await bridgeState.claimHistory?.(record.id) ?? true
+          await bridgeState.trace?.({ type: 'history', at: new Date().toISOString(), key: record.id, status: claimed ? 'claimed' : 'already-claimed' })
+          if (!claimed) continue
+          let lost = false
+          let renewalInFlight: Promise<void> | undefined
+          const renew = () => {
+            if (renewalInFlight || lost) return
+            const renewalCall = bridgeState.renewHistory?.(record.id)
+            renewalInFlight = renewalCall?.then(() => {
+              void Promise.resolve(bridgeState.trace?.({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'renewed' })).catch(() => undefined)
+            }).catch(() => {
+              lost = true
+              void Promise.resolve(bridgeState.trace?.({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'lease-lost' })).catch(() => undefined)
+            }).finally(() => { renewalInFlight = undefined })
+          }
+          const renewal = setInterval(renew, 10_000)
           try {
             const proposals = await dreamAdapter.propose({ newHistory: [record], profile: maintenanceProfile, index: maintenanceIndex, relevantMemories: maintenanceRelevant })
-            for (const proposal of proposals) await memory.apply(proposal)
+            if (lost) throw new Error('history lease lost during dream')
+            const parsedProposals = proposals.map(proposal => ProposalSchema.parse(proposal))
+            const mutations = parsedProposals.filter(proposal => proposal.action !== 'IGNORE')
+            if (mutations.length > 1) throw new Error(`Dream returned multiple mutations for history ${record.id}`)
+            const selected = mutations[0] ?? parsedProposals[0]
+            await bridgeState.trace?.({ type: 'dream_proposal', at: new Date().toISOString(), key: record.id, status: selected ? 'received' : 'empty' })
+            if (selected) {
+              const withEvidence = ProposalSchema.parse({ ...selected, sourceEvidence: [...new Set([...('sourceEvidence' in selected ? selected.sourceEvidence : []), `history:${record.id}`])] })
+              await memory.apply(withEvidence)
+              if (lost) throw new Error('history lease lost during memory apply')
+              await bridgeState.trace?.({ type: 'memory_apply', at: new Date().toISOString(), key: record.id, status: 'completed' })
+            }
             await bridgeState.completeHistory?.(record.id)
+            await bridgeState.trace?.({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'completed' })
+            pending.push(record)
           } catch (error) {
             await bridgeState.failHistory?.(record.id)
+            await bridgeState.trace?.({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'failed' })
             throw error
           } finally {
             clearInterval(renewal)
+            await renewalInFlight?.catch(() => undefined)
           }
         }
         const raw = await hiddenText('maintenance', `你是后台维护器。仅输出严格 JSON AgentAction，只能选择 REFLECT、CREATE_SKILL、PROPOSE_PLUGIN 或 NOOP。长期记忆 proposal 已优先处理；如有能力缺口优先 CREATE_SKILL，其次 PROPOSE_PLUGIN，否则 REFLECT 或 NOOP。绝不联系用户。HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`)
@@ -432,6 +461,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       if (result.action?.type === 'MESSAGE_USER' && bridge) {
         const sessionId = sessionIdForPeer(allowedPeerId)
         await memory.consume([{ sessionId, seq: await bridgeState.nextSequence(sessionId), role: 'assistant', content: result.action.text, at: input.at ?? heartbeatService.now() }])
+        await bridgeState.trace?.({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
         await bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, stableKey: `${sessionId}:${input.occurrenceId}` })
       }
     },
@@ -458,31 +488,39 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   let bridge: PersonalGrowthBridge | undefined
   const turnEvents = new Map<string, Map<number, Array<{ seq: number; type: string; data: unknown }>>>()
   const activeTurns = new Map<string, number>()
+  const maintenanceTasks = new Set<Promise<unknown>>()
   const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; data: unknown }[]): Promise<void> => {
     const messages: Array<{ role: 'user' | 'assistant'; content: string; at: string }> = []
     for (const event of events) {
       const data = event.data as { message?: { source?: { kind?: string }; content?: Array<{ type?: string; text?: string }> }; turn?: number }
       if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
       const content = data.message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
-      if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && data.message?.source?.kind !== 'user')) continue
+      const source = data.message?.source as { kind?: string; plugin?: string; form?: string } | undefined
+      const isInjectedSnapshot = source?.kind === 'plugin' && source.plugin === name && source.form === 'snapshot'
+      if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && isInjectedSnapshot)) continue
       messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
     }
     if (!messages.length) return
     const conversation = []
     for (const message of messages) conversation.push({ sessionId, seq: await bridgeState.nextSequence(sessionId), ...message })
+    await bridgeState.trace?.({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'started' })
     await memory.consume(conversation)
+    await bridgeState.trace?.({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
   }
   ctx.on('session/event', (session, event) => {
     const sessionId = String(session.id)
     const declaredTurn = (event.data as { turn?: number }).turn
-    if (event.type === 'turn/start' && declaredTurn !== undefined) activeTurns.set(sessionId, declaredTurn)
-    const turn = declaredTurn ?? activeTurns.get(sessionId)
-    if (turn !== undefined) {
-      const byTurn = turnEvents.get(sessionId) ?? new Map<number, Array<{ seq: number; type: string; data: unknown }>>()
-      const values = byTurn.get(turn) ?? []
-      values.push({ seq: event.seq, type: event.type, data: event.data })
-      byTurn.set(turn, values)
-      turnEvents.set(sessionId, byTurn)
+    const foregroundSessionId = sessionIdForPeer(allowedPeerId)
+    if (sessionId === foregroundSessionId) {
+      if (event.type === 'turn/start' && declaredTurn !== undefined) activeTurns.set(sessionId, declaredTurn)
+      const turn = declaredTurn ?? activeTurns.get(sessionId)
+      if (turn !== undefined) {
+        const byTurn = turnEvents.get(sessionId) ?? new Map<number, Array<{ seq: number; type: string; data: unknown }>>()
+        const values = byTurn.get(turn) ?? []
+        values.push({ seq: event.seq, type: event.type, data: event.data })
+        byTurn.set(turn, values)
+        turnEvents.set(sessionId, byTurn)
+      }
     }
     if (event.type === 'assistant/message') {
       const text = event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
@@ -498,13 +536,17 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     if (completed && bridge && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
       bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, at: new Date(event.time).toISOString() })
     }
-    if (completed && !hiddenSessionIds.has(sessionId)) void consumeStandaloneTurn(sessionId, eventsForTurn).catch(error => { process.nextTick(() => { throw error }) })
+    if (completed && sessionId === foregroundSessionId) {
+      const task = consumeStandaloneTurn(sessionId, eventsForTurn).catch(error => { process.nextTick(() => { throw error }) })
+      maintenanceTasks.add(task)
+      void task.finally(() => maintenanceTasks.delete(task)).catch(() => undefined)
+    }
     activeTurns.delete(sessionId)
   })
   ctx.effect(() => {
     bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, onStartError: error => { process.nextTick(() => { throw error }) } })
     const started = bridge.start()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { await bridge?.stop(); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined }
+    return async () => { await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined }
   })
 }

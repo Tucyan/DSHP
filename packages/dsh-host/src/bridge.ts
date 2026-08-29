@@ -10,6 +10,7 @@ export interface BridgeInbound {
 }
 
 export interface BridgeTarget { peerId: string; messageId?: string }
+export interface OutboundEnvelope { target: BridgeTarget; text: string }
 
 export interface BridgeBot {
   onMessage(handler: (message: BridgeInbound) => Promise<void>): void
@@ -61,7 +62,9 @@ export interface BridgeState {
   failHistory?(historyId: string): Promise<void>
   nextSequence(sessionId: string): Promise<number>
   acceptOutbound(key: string): Promise<boolean>
-  claimOutbound?(key: string): Promise<'claimed' | 'sent' | 'pending' | 'unknown'>
+  claimOutbound?(key: string, envelope?: OutboundEnvelope): Promise<'claimed' | 'sent' | 'pending' | 'unknown'>
+  listPendingOutbound?(): Promise<Array<{ key: string } & OutboundEnvelope>>
+  markOutboundDispatched?(key: string): Promise<void>
   completeOutbound?(key: string): Promise<void>
   markOutboundUnknown?(key: string): Promise<void>
   reconcileOutbound?(key: string, decision: 'retry' | 'sent'): Promise<void>
@@ -158,6 +161,7 @@ export class PersonalGrowthBridge {
       this.started = false
       throw this.botStartError
     }
+    await this.recoverPendingOutbound()
     void this.botStart.catch(error => {
       this.botStartError = error
       this.options.onStartError?.(error)
@@ -297,13 +301,15 @@ export class PersonalGrowthBridge {
 
   private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<void> {
     const state = this.options.state
-    const status = state?.claimOutbound ? await state.claimOutbound(key) : ((await state?.acceptOutbound(key)) ?? true ? 'claimed' : 'sent')
+    const envelope = { target, text }
+    const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : ((await state?.acceptOutbound(key)) ?? true ? 'claimed' : 'sent')
     if (status !== 'claimed') {
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status })
       return
     }
     await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'pending' })
     try {
+      if (state?.markOutboundDispatched) await state.markOutboundDispatched(key)
       await this.options.bot.sendText(target, text)
       if (state?.completeOutbound) await state.completeOutbound(key)
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'sent' })
@@ -312,6 +318,14 @@ export class PersonalGrowthBridge {
       else await state?.failOutbound?.(key)
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'unknown', reason: 'transport_failure' })
       throw error
+    }
+  }
+
+  private async recoverPendingOutbound(): Promise<void> {
+    const pending = await this.options.state?.listPendingOutbound?.() ?? []
+    for (const item of pending) {
+      try { await this.sendOutbound(item.key, item.target, item.text) }
+      catch { /* unknown is durably retained; startup must not retry it blindly */ }
     }
   }
 

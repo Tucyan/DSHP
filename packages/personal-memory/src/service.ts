@@ -117,6 +117,12 @@ export class MemoryService {
   private async applyNow(proposal: MemoryProposal): Promise<MutationResult> {
     const revisionLedger = await readJsonl(this.paths.revisions, RevisionSchema);
     if (revisionLedger.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisionLedger.errors.map((error) => error.line).join(',')}`);
+    if (proposal.action !== 'IGNORE') {
+      const historyEvidence = proposal.sourceEvidence.find((evidence) => evidence.startsWith('history:'));
+      const expectedPath = proposal.action === 'MERGE' ? proposal.targetPath : proposal.path;
+      const existing = historyEvidence && revisionLedger.records.find((revision) => revision.action === proposal.action && (revision.path === expectedPath || revision.path === proposal.path) && revision.source.includes(historyEvidence));
+      if (existing) return { accepted: true, action: proposal.action, path: existing.path, revision: existing, trace: { result: 'already-applied' } };
+    }
     if (proposal.action === 'IGNORE') return { accepted: true, action: 'IGNORE', path: proposal.path, trace: { result: 'ignored', reason: proposal.reason } };
     const source = proposal.sourceEvidence;
     if (proposal.action === 'CREATE') {
