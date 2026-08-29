@@ -4,6 +4,8 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../personal-memory" },
-    { "path": "../personal-heartbeat" }
+    { "path": "../personal-heartbeat" },
+    { "path": "../runtime" },
+    { "path": "../dsh-adapter" }
   ]
 }

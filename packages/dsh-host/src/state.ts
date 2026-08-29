@@ -1,7 +1,8 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, parse } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
-import type { BridgeState, OutboundEnvelope } from './bridge.js'
+import type { BridgeState, ConversationEvent } from './bridge.js'
+import type { OutboundEnvelope } from './bridge.js'
 
 const MAX_ENTRIES = 10_000
 const MAX_ID = 512
@@ -10,8 +11,9 @@ const MAX_TRACES = 1_000
 interface TraceRecord { type: string; at: string; key?: string; status?: string; reason?: string }
 type InboundRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string }
 type HistoryRecordState = InboundRecord
+type MemoryTurnRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string; events: ConversationEvent[] }
 type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string; target?: { peerId: string; messageId?: string }; text?: string }
-interface StateFile { inbound: Record<string, InboundRecord>; outbound: Record<string, OutboundRecord>; sequences: Record<string, number>; histories: Record<string, HistoryRecordState>; traces: TraceRecord[] }
+interface StateFile { inbound: Record<string, InboundRecord>; outbound: Record<string, OutboundRecord>; sequences: Record<string, number>; histories: Record<string, HistoryRecordState>; memoryTurns: Record<string, MemoryTurnRecord>; traces: TraceRecord[] }
 export type OutboundClaim = 'claimed' | 'sent' | 'pending' | 'unknown'
 interface LockOwner { token: string; pid: number; leaseUntil: string }
 function strictObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -50,6 +52,20 @@ function parseTrace(value: unknown): TraceRecord {
   const object = strictObject(value, ['type', 'at', 'key', 'status', 'reason'])
   if (typeof object.type !== 'string' || !object.type || object.type.length > 64 || typeof object.at !== 'string' || !Number.isFinite(Date.parse(object.at)) || (object.key !== undefined && (typeof object.key !== 'string' || object.key.length > MAX_ID)) || (object.status !== undefined && (typeof object.status !== 'string' || object.status.length > 64)) || (object.reason !== undefined && (typeof object.reason !== 'string' || object.reason.length > 256))) throw new Error('Malformed bridge trace')
   return object as unknown as TraceRecord
+}
+function parseMemoryTurn(value: unknown): MemoryTurnRecord {
+  const object = strictObject(value, ['status', 'owner', 'leaseUntil', 'events'])
+  if (object.status !== 'pending' && object.status !== 'completed') throw new Error('Malformed memory turn state')
+  validateLeaseFields(object)
+  if (object.status === 'pending' && (typeof object.owner !== 'string' || typeof object.leaseUntil !== 'string')) throw new Error('Memory turn lease metadata is required')
+  if (object.status === 'completed' && (object.owner !== undefined || object.leaseUntil !== undefined)) throw new Error('Completed memory turn may not carry lease metadata')
+  if (!Array.isArray(object.events) || object.events.length < 1 || object.events.length > 100) throw new Error('Malformed memory turn events')
+  const events = object.events.map(event => {
+    const item = strictObject(event, ['sessionId', 'seq', 'role', 'content', 'at'])
+    if (typeof item.sessionId !== 'string' || item.sessionId.length < 1 || item.sessionId.length > MAX_ID || !Number.isInteger(item.seq) || Number(item.seq) < 1 || Number(item.seq) > MAX_SEQ || (item.role !== 'user' && item.role !== 'assistant') || typeof item.content !== 'string' || item.content.length < 1 || item.content.length > 20_000 || typeof item.at !== 'string' || !Number.isFinite(Date.parse(item.at))) throw new Error('Malformed memory turn event')
+    return item as unknown as ConversationEvent
+  })
+  return { ...object, events } as unknown as MemoryTurnRecord
 }
 function parseLockOwner(value: unknown): LockOwner {
   const object = strictObject(value, ['token', 'pid', 'leaseUntil'])
@@ -109,6 +125,39 @@ export class FileBridgeState implements BridgeState {
   failInbound(messageId: string): Promise<void> {
     this.assertId(messageId)
     return this.update(state => { const record = state.inbound[messageId]; if (record?.owner === this.owner) delete state.inbound[messageId] })
+  }
+
+  claimMemoryTurn(key: string, events: readonly ConversationEvent[]): Promise<'claimed' | 'completed' | 'pending'> {
+    this.assertId(key)
+    if (!Array.isArray(events) || events.length < 1 || events.length > 100) throw new Error('Memory turn events exceed bounds')
+    const checked = parseMemoryTurn({ status: 'pending', owner: this.owner, leaseUntil: new Date(Date.now() + this.lockTimeoutMs).toISOString(), events })
+    return this.update(state => {
+      const record = state.memoryTurns[key]
+      if (record?.status === 'completed') return 'completed' as const
+      const now = Date.now()
+      if (record?.status === 'pending' && record.owner !== this.owner && record.leaseUntil && Date.parse(record.leaseUntil) > now) return 'pending' as const
+      state.memoryTurns[key] = checked
+      return 'claimed' as const
+    })
+  }
+
+  listPendingMemoryTurns(): Promise<Array<{ key: string; events: ConversationEvent[] }>> {
+    return this.update(state => Object.entries(state.memoryTurns).filter(([, value]) => value.status === 'pending').map(([key, value]) => ({ key, events: value.events })))
+  }
+
+  completeMemoryTurn(key: string): Promise<void> {
+    this.assertId(key)
+    return this.update(state => {
+      const record = state.memoryTurns[key]
+      if (!record) throw new Error('memory turn claim is missing')
+      if (record.status === 'pending' && record.owner !== this.owner) throw new Error('memory turn ownership lost')
+      state.memoryTurns[key] = { status: 'completed', events: record.events }
+    })
+  }
+
+  failMemoryTurn(key: string): Promise<void> {
+    this.assertId(key)
+    return this.update(state => { if (state.memoryTurns[key]?.owner === this.owner) delete state.memoryTurns[key] })
   }
 
   claimHistory(historyId: string): Promise<boolean> {
@@ -320,7 +369,7 @@ export class FileBridgeState implements BridgeState {
   private async read(): Promise<StateFile> {
     try {
       const parsed = JSON.parse(await readFile(this.filename, 'utf8')) as Record<string, unknown>
-      const allowed = new Set(['inbound', 'outbound', 'sequences', 'histories', 'traces'])
+      const allowed = new Set(['inbound', 'outbound', 'sequences', 'histories', 'memoryTurns', 'traces'])
       if (Object.keys(parsed).some(key => !allowed.has(key))) throw new Error('Malformed bridge state: unknown field')
       const inbound: Record<string, InboundRecord> = {}
       if (Array.isArray(parsed.inbound)) {
@@ -339,10 +388,13 @@ export class FileBridgeState implements BridgeState {
       if (parsed.histories && typeof parsed.histories === 'object') {
         for (const [id, value] of Object.entries(parsed.histories as Record<string, unknown>)) { this.assertId(id); histories[id] = parseInbound(value) }
       }
+      const memoryTurns: Record<string, MemoryTurnRecord> = {}
+      if (parsed.memoryTurns !== undefined && (parsed.memoryTurns === null || typeof parsed.memoryTurns !== 'object' || Array.isArray(parsed.memoryTurns))) throw new Error('Malformed bridge state: memoryTurns')
+      if (parsed.memoryTurns && typeof parsed.memoryTurns === 'object') for (const [key, value] of Object.entries(parsed.memoryTurns as Record<string, unknown>)) { this.assertId(key); memoryTurns[key] = parseMemoryTurn(value) }
       const traces = Array.isArray(parsed.traces) ? parsed.traces.map(value => parseTrace(value)) : parsed.traces === undefined ? [] : (() => { throw new Error('Malformed bridge state: traces') })()
       if (traces.length > MAX_TRACES) throw new Error('bridge trace state exceeds bounds')
-      if (Object.keys(inbound).length > MAX_ENTRIES || Object.keys(outbound).length > MAX_ENTRIES || Object.keys(sequences).length > MAX_ENTRIES || Object.keys(histories).length > MAX_ENTRIES) throw new Error('bridge state exceeds entry bounds')
-      return { inbound, outbound, sequences, histories, traces }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { inbound: {}, outbound: {}, sequences: {}, histories: {}, traces: [] }; throw error }
+      if (Object.keys(inbound).length > MAX_ENTRIES || Object.keys(outbound).length > MAX_ENTRIES || Object.keys(sequences).length > MAX_ENTRIES || Object.keys(histories).length > MAX_ENTRIES || Object.keys(memoryTurns).length > MAX_ENTRIES) throw new Error('bridge state exceeds entry bounds')
+      return { inbound, outbound, sequences, histories, memoryTurns, traces }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { inbound: {}, outbound: {}, sequences: {}, histories: {}, memoryTurns: {}, traces: [] }; throw error }
   }
 }

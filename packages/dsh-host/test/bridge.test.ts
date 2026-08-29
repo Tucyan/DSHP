@@ -258,6 +258,18 @@ describe('PersonalGrowthBridge', () => {
     expect(qq.stopped).toBe(true)
   })
 
+  it('delegates explicit foreground wakes to the heartbeat policy instead of bypassing it', async () => {
+    const qq = bot(); let wakes = 0
+    const userAgent = agent('foreground')
+    const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return userAgent }, async create() { return userAgent } }, memory: memory(), allowedPeerId: 'user-1', heartbeat: { async wakeForeground() { wakes++ }, async wakeBackground() {} } })
+    await bridge.start()
+    await bridge.runForegroundWake({ occurrenceId: 'occurrence-1' })
+    expect(wakes).toBe(1)
+    expect(userAgent.followed).toEqual([])
+    expect(qq.sent).toEqual([])
+    await bridge.stop()
+  })
+
   it('routes a real foreground assistant event once, including proactive events without a reply id', async () => {
     const qq = bot()
     const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: state(), allowedPeerId: 'user-1' })
@@ -294,6 +306,20 @@ describe('PersonalGrowthBridge', () => {
       const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: new FileBridgeState(stateFile), allowedPeerId: 'user-1' })
       await bridge.start()
       expect(qq.sent).toEqual(['safe pending'])
+      await bridge.stop()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('quarantines a pending outbound addressed to another peer without sending', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-peer-isolation-'))
+    try {
+      const stateFile = join(root, 'bridge.json')
+      await writeFile(stateFile, JSON.stringify({ inbound: {}, outbound: { foreign: { status: 'pending', owner: 'old-owner', leaseUntil: '2020-01-01T00:00:00.000Z', target: { peerId: 'other-peer' }, text: 'must not leak' } }, sequences: {}, histories: {}, traces: [] }))
+      const qq = bot()
+      const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: new FileBridgeState(stateFile), allowedPeerId: 'user-1' })
+      await bridge.start()
+      expect(qq.sent).toEqual([])
+      expect(await new FileBridgeState(stateFile).claimOutbound('foreign')).toBe('unknown')
       await bridge.stop()
     } finally { await rm(root, { recursive: true, force: true }) }
   })

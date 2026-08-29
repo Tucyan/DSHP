@@ -105,6 +105,21 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('persists pending memory turns and recovers them across state instances', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-memory-turn-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const first = new FileBridgeState(file)
+      const events = [{ sessionId: 's', seq: 1, role: 'user' as const, content: 'hello', at: '2026-01-01T00:00:00.000Z' }]
+      expect(await first.claimMemoryTurn('s:turn:1', events)).toBe('claimed')
+      const second = new FileBridgeState(file)
+      expect(await second.listPendingMemoryTurns()).toEqual([{ key: 's:turn:1', events }])
+      await first.completeMemoryTurn('s:turn:1')
+      expect(await second.listPendingMemoryTurns()).toEqual([])
+      expect(await second.claimMemoryTurn('s:turn:1', events)).toBe('completed')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('uses durable outbound pending and sent states with explicit reconcile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
     try {

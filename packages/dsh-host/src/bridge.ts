@@ -50,6 +50,8 @@ export interface BridgeDream {
   propose(input: { newHistory: readonly unknown[]; profile: string; index: string; relevantMemories: readonly string[] }): Promise<readonly unknown[]>
 }
 
+export type MemoryTurnClaim = 'claimed' | 'completed' | 'pending'
+
 /** Durable state is supplied by the production host; this prevents restart races. */
 export interface BridgeState {
   acceptInbound(messageId: string): Promise<boolean>
@@ -57,6 +59,10 @@ export interface BridgeState {
   renewInbound?(messageId: string): Promise<void>
   completeInbound?(messageId: string): Promise<void>
   failInbound?(messageId: string): Promise<void>
+  claimMemoryTurn?(key: string, events: readonly ConversationEvent[]): Promise<MemoryTurnClaim>
+  listPendingMemoryTurns?(): Promise<Array<{ key: string; events: ConversationEvent[] }>>
+  completeMemoryTurn?(key: string): Promise<void>
+  failMemoryTurn?(key: string): Promise<void>
   claimHistory?(historyId: string): Promise<boolean>
   renewHistory?(historyId: string): Promise<void>
   completeHistory?(historyId: string): Promise<void>
@@ -190,15 +196,8 @@ export class PersonalGrowthBridge {
 
   /** Run one foreground proactive turn through the same durable foreground agent. */
   async runForegroundWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<void> {
-    if (!this.started) return
-    const agent = await this.getForeground()
-    const sessionId = sessionIdForPeer(this.options.allowedPeerId)
-    const profile = await this.options.memory.readProfile()
-    const relevant = await this.options.memory.search('recent goals progress follow-up', 8)
-    agent.inject({ text: `前台主动跟进 ${input.occurrenceId}\nPROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}`, source: 'personal-memory' })
-    this.activeMessageIds.delete(sessionId)
-    agent.followup({ text: '请根据当前上下文判断是否需要联系用户；若不需要请保持安静。', source: 'heartbeat' })
-    await agent.whenIdle()
+    if (!this.started || !this.options.heartbeat) return
+    await this.options.heartbeat.wakeForeground(input)
   }
 
   /** Called by the host's public session/event listener. Background IDs are never registered. */
@@ -337,6 +336,12 @@ export class PersonalGrowthBridge {
   private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<void> {
     const state = this.options.state
     const envelope = { target, text }
+    if (target.peerId !== this.options.allowedPeerId) {
+      const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : 'unknown'
+      if (status === 'claimed') await state?.markOutboundUnknown?.(key)
+      await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'quarantined', reason: 'peer_mismatch' })
+      return
+    }
     const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : ((await state?.acceptOutbound(key)) ?? true ? 'claimed' : 'sent')
     if (status !== 'claimed') {
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status })
