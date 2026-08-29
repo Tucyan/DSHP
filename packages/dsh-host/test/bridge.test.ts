@@ -8,6 +8,10 @@ import {
   type BridgeInbound,
   type BridgeMemory,
 } from '../src/bridge.js'
+import { FileBridgeState } from '../src/state.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 function inbound(overrides: Partial<BridgeInbound> = {}): BridgeInbound {
   return {
@@ -263,6 +267,19 @@ describe('PersonalGrowthBridge', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(qq.sent).toEqual(['主动跟进'])
     await bridge.stop()
+  })
+
+  it('exposes outbound failure and persists an unknown outcome for explicit reconciliation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
+    try {
+      const qq = bot(); qq.sendText = async () => { throw new Error('transport result unknown') }
+      const bridgeState = new FileBridgeState(join(root, 'bridge.json'))
+      const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: bridgeState, allowedPeerId: 'user-1' })
+      await bridge.start()
+      await expect(bridge.observeAgentEvent({ sessionId: sessionIdForPeer('user-1'), seq: 7, type: 'assistant/message', text: '一次主动消息' })).rejects.toThrow(/unknown/)
+      expect(await new FileBridgeState(join(root, 'bridge.json')).claimOutbound(`${sessionIdForPeer('user-1')}:7`)).toBe('unknown')
+      await bridge.stop()
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('deduplicates inbound message ids and uses persisted sequence allocation', async () => {

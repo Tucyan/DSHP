@@ -273,15 +273,24 @@ export function createDshAgentRegistry(ctx: Context, tracker?: CompletionTracker
       const exists = snapshots.some(snapshot => String(snapshot.header.id) === sessionId)
       if (!exists) return this.create({ sessionId })
       const handle = await agents.resume({ resumeSessionId: id, agentOptions })
-      assertCapabilities?.(handle.agent as Agent)
+      try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
     async create({ sessionId }) {
       const handle = await agents.create({ sessionId: SessionId(sessionId), agentOptions })
-      assertCapabilities?.(handle.agent as Agent)
+      try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
   }
+}
+
+async function waitForCapabilities(handle: AgentHandle, assertCapabilities?: (agent: Agent) => void): Promise<void> {
+  if (!assertCapabilities) return
+  let lastError: unknown
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { assertCapabilities(handle.agent as Agent); return } catch (error) { lastError = error; await new Promise(resolve => setTimeout(resolve, 0)) }
+  }
+  throw lastError instanceof Error ? lastError : new Error('DSH agent capabilities unavailable')
 }
 
 async function openHiddenAgent(ctx: Context, sessionId: string, tracker: CompletionTracker, setup: (agentCtx: Context) => void): Promise<BridgeAgent> {
@@ -349,7 +358,12 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
     if (existing) return existing
-    const agent = await openHiddenAgent(ctx, sessionId, tracker, createBackgroundAgentSetup())
+    const setup = role === 'maintenance' ? createBackgroundAgentSetup() : (agentCtx: Context) => {
+      const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
+      if (!tools?.restrict) throw new Error(`personal-growth-dsh-host requires tool restriction for hidden ${role} agent`)
+      tools.restrict({ allow: role === 'dream' ? ['personal_memory_apply'] : ['skill'] })
+    }
+    const agent = await openHiddenAgent(ctx, sessionId, tracker, setup)
     hiddenSessionIds.add(agent.id)
     hiddenSessionIds.add(sessionId)
     hiddenAgents.set(role, agent)
@@ -386,32 +400,40 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
         const pending = []
-        for (const record of historyResult.records.slice(-20)) {
+        for (const record of historyResult.records) {
           const claimed = await bridgeState.claimHistory?.(record.id) ?? true
           if (claimed) pending.push(record)
         }
+        const maintenanceProfile = await memory.readProfile()
+        const maintenanceIndex = await memory.readIndex()
+        const maintenanceRelevant = await memory.search(pending.map(record => record.summary).join(' ') || 'capability gap skill improvement', 8)
         for (const record of pending) {
+          const renewal = setInterval(() => { void bridgeState.renewHistory?.(record.id) }, 10_000)
           try {
-            const proposals = await dreamAdapter.propose({ newHistory: [record], profile: await memory.readProfile(), index: await memory.readIndex(), relevantMemories: [] })
+            const proposals = await dreamAdapter.propose({ newHistory: [record], profile: maintenanceProfile, index: maintenanceIndex, relevantMemories: maintenanceRelevant })
             for (const proposal of proposals) await memory.apply(proposal)
             await bridgeState.completeHistory?.(record.id)
           } catch (error) {
             await bridgeState.failHistory?.(record.id)
             throw error
+          } finally {
+            clearInterval(renewal)
           }
         }
-        const profile = await memory.readProfile(); const index = await memory.readIndex()
-        const relevant = await memory.search('capability gap skill improvement', 8)
-        const raw = await hiddenText('maintenance', `你是后台维护器。仅输出严格 JSON AgentAction，只能选择 REFLECT、CREATE_SKILL、PROPOSE_PLUGIN 或 NOOP。长期记忆 proposal 已优先处理；如有能力缺口优先 CREATE_SKILL，其次 PROPOSE_PLUGIN，否则 REFLECT 或 NOOP。绝不联系用户。HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${profile}\nINDEX:\n${index}\nRELEVANT:\n${relevant.join('\n')}`)
+        const raw = await hiddenText('maintenance', `你是后台维护器。仅输出严格 JSON AgentAction，只能选择 REFLECT、CREATE_SKILL、PROPOSE_PLUGIN 或 NOOP。长期记忆 proposal 已优先处理；如有能力缺口优先 CREATE_SKILL，其次 PROPOSE_PLUGIN，否则 REFLECT 或 NOOP。绝不联系用户。HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`)
         return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
       },
     },
-    sink: { append: async record => { await mkdir(resolve(workspaceRoot, '.personal-growth'), { recursive: true }); await appendJsonl(resolve(workspaceRoot, '.personal-growth', 'heartbeat-events.jsonl'), record) } },
+    sink: { append: async record => { await mkdir(resolve(workspaceRoot, '.personal-growth'), { recursive: true }); await appendJsonl(resolve(workspaceRoot, '.personal-growth', 'heartbeat-events.jsonl'), { type: 'heartbeat_decision', ...record }) } },
   })
   const heartbeat: BridgeHeartbeat = config.heartbeat ?? {
     wakeForeground: async input => {
       const result = await heartbeatService.wakeForeground({ occurrenceId: input.occurrenceId, at: input.at, importance: (input.importance ?? 0) >= 2 ? 'high' : 'low' })
-      if (result.action?.type === 'MESSAGE_USER' && bridge) bridge.observeAgentEvent({ sessionId: sessionIdForPeer(allowedPeerId), type: 'assistant/message', text: result.action.text, completed: true, stableKey: `${sessionIdForPeer(allowedPeerId)}:${input.occurrenceId}` })
+      if (result.action?.type === 'MESSAGE_USER' && bridge) {
+        const sessionId = sessionIdForPeer(allowedPeerId)
+        await memory.consume([{ sessionId, seq: await bridgeState.nextSequence(sessionId), role: 'assistant', content: result.action.text, at: input.at ?? heartbeatService.now() }])
+        await bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, stableKey: `${sessionId}:${input.occurrenceId}` })
+      }
     },
     wakeBackground: async input => {
       const result = await heartbeatService.wakeBackground({ occurrenceId: input.occurrenceId, at: input.at })

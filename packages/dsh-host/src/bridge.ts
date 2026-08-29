@@ -56,11 +56,17 @@ export interface BridgeState {
   completeInbound?(messageId: string): Promise<void>
   failInbound?(messageId: string): Promise<void>
   claimHistory?(historyId: string): Promise<boolean>
+  renewHistory?(historyId: string): Promise<void>
   completeHistory?(historyId: string): Promise<void>
   failHistory?(historyId: string): Promise<void>
   nextSequence(sessionId: string): Promise<number>
   acceptOutbound(key: string): Promise<boolean>
+  claimOutbound?(key: string): Promise<'claimed' | 'sent' | 'pending' | 'unknown'>
+  completeOutbound?(key: string): Promise<void>
+  markOutboundUnknown?(key: string): Promise<void>
+  reconcileOutbound?(key: string, decision: 'retry' | 'sent'): Promise<void>
   failOutbound?(key: string): Promise<void>
+  trace?(record: { type: string; at: string; key?: string; status?: string; reason?: string }): Promise<void>
 }
 
 export interface BridgeHeartbeat {
@@ -105,6 +111,7 @@ export interface PersonalGrowthBridgeOptions {
   onStartError?: (error: unknown) => void
   /** Production DSH session observers own the single consume/Dream pipeline. */
   processMemory?: boolean
+  trace?: (record: { type: string; at: string; key?: string; status?: string; reason?: string }) => void | Promise<void>
 }
 
 export function sessionIdForPeer(peerId: string): string {
@@ -190,20 +197,21 @@ export class PersonalGrowthBridge {
   }
 
   /** Called by the host's public session/event listener. Background IDs are never registered. */
-  observeAgentEvent(event: BridgeSessionEvent): void {
+  observeAgentEvent(event: BridgeSessionEvent): Promise<void> {
     if (event.type === 'assistant/message' && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
       this.observed.set(event.sessionId, event.text)
       const key = event.stableKey ?? `${event.sessionId}:${event.seq ?? event.text}`
-      void (this.options.state?.acceptOutbound(key) ?? Promise.resolve(true)).then(accepted => {
-        if (accepted) void this.options.bot.sendText({ peerId: this.options.allowedPeerId, messageId: event.messageId ?? this.activeMessageIds.get(event.sessionId) }, event.text).catch(() => this.options.state?.failOutbound?.(key))
-      })
+      const task = this.sendOutbound(key, { peerId: this.options.allowedPeerId, messageId: event.messageId ?? this.activeMessageIds.get(event.sessionId) }, event.text)
+      this.trackWorker(task)
+      return task
     }
+    return Promise.resolve()
   }
 
   private enqueue(message: BridgeInbound): Promise<void> {
     const operation = this.processing.then(async () => {
       try { await this.process(message) }
-      catch (error) { await this.options.state?.failInbound?.(message.messageId); throw error }
+      catch (error) { await this.options.state?.failInbound?.(message.messageId); await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'failure', reason: 'processing_failure' }); throw error }
     })
     this.processing = operation.catch(() => undefined)
     return operation
@@ -228,6 +236,7 @@ export class PersonalGrowthBridge {
     const inboundState = this.options.state?.claimInbound
       ? await this.options.state.claimInbound(message.messageId)
       : (this.options.state && !await this.options.state.acceptInbound(message.messageId) ? 'completed' : 'claimed')
+    await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: inboundState })
     if (inboundState && inboundState !== 'claimed') return
     const profile = await this.options.memory.readProfile()
     const relevant = await this.options.memory.search(message.text, 8)
@@ -245,14 +254,11 @@ export class PersonalGrowthBridge {
     const assistantText = this.observed.get(sessionId) ?? textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
     if (assistantText?.trim() && !this.observed.has(sessionId)) {
       const key = `${sessionId}:turn:${message.messageId}`
-      const accepted = await (this.options.state?.acceptOutbound(key) ?? true)
-      if (accepted) {
-        try { await this.options.bot.sendText({ peerId: message.peerId, messageId: message.messageId }, assistantText) }
-        catch (error) { await this.options.state?.failOutbound?.(key); throw error }
-      }
+      await this.sendOutbound(key, { peerId: message.peerId, messageId: message.messageId }, assistantText)
     }
     if (this.options.processMemory === false) {
       await this.options.state?.completeInbound?.(message.messageId)
+      await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'completed' })
       return
     }
     const at = message.at ?? this.options.now?.() ?? new Date().toISOString()
@@ -266,6 +272,7 @@ export class PersonalGrowthBridge {
       for (const proposal of proposals) await this.options.memory.apply(proposal)
     }
     await this.options.state?.completeInbound?.(message.messageId)
+    await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'completed' })
   }
 
   private async nextSequence(sessionId: string): Promise<number> {
@@ -286,5 +293,30 @@ export class PersonalGrowthBridge {
   private trackWorker(task: Promise<unknown>): void {
     this.workerTasks.add(task)
     void task.finally(() => this.workerTasks.delete(task)).catch(() => undefined)
+  }
+
+  private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<void> {
+    const state = this.options.state
+    const status = state?.claimOutbound ? await state.claimOutbound(key) : ((await state?.acceptOutbound(key)) ?? true ? 'claimed' : 'sent')
+    if (status !== 'claimed') {
+      await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status })
+      return
+    }
+    await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'pending' })
+    try {
+      await this.options.bot.sendText(target, text)
+      if (state?.completeOutbound) await state.completeOutbound(key)
+      await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'sent' })
+    } catch (error) {
+      if (state?.markOutboundUnknown) await state.markOutboundUnknown(key)
+      else await state?.failOutbound?.(key)
+      await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'unknown', reason: 'transport_failure' })
+      throw error
+    }
+  }
+
+  private emitTrace(record: { type: string; at: string; key?: string; status?: string; reason?: string }): Promise<void> {
+    const safe = { ...record, key: record.key ? createHash('sha256').update(record.key, 'utf8').digest('hex').slice(0, 16) : undefined }
+    return Promise.resolve(this.options.trace?.(safe)).then(() => this.options.state?.trace?.(safe)).then(() => undefined)
   }
 }
