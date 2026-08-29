@@ -124,8 +124,6 @@ export interface PersonalGrowthBridgeOptions {
   onStartError?: (error: unknown) => void
   /** Production DSH session observers own the single consume/Dream pipeline. */
   processMemory?: boolean
-  /** Internal host wiring; never exposed as a generic public event sender. */
-  verifiedObserverSink?: (observer: (event: BridgeSessionEvent) => Promise<void>) => void
   trace?: (record: { type: string; at: string; key?: string; status?: string; reason?: string }) => void | Promise<void>
 }
 
@@ -164,7 +162,6 @@ export class PersonalGrowthBridge {
 
   constructor(options: PersonalGrowthBridgeOptions) {
     this.options = options
-    options.verifiedObserverSink?.(event => this[verifiedObserver](event))
   }
 
   async start(): Promise<void> {
@@ -389,4 +386,10 @@ export class PersonalGrowthBridge {
       return this.options.state?.trace?.(safe)
     }).then(() => undefined)
   }
+}
+
+/** @internal Host plugin wiring; intentionally omitted from the package index. */
+export function createHostBridge(options: PersonalGrowthBridgeOptions): { bridge: PersonalGrowthBridge; observeVerified: (event: BridgeSessionEvent) => Promise<void> } {
+  const bridge = new PersonalGrowthBridge(options)
+  return { bridge, observeVerified: event => bridge[verifiedObserver](event) }
 }

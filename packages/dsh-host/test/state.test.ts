@@ -113,7 +113,7 @@ describe('FileBridgeState', () => {
       const events = [{ sessionId: 's', seq: 1, role: 'user' as const, content: 'hello', at: '2026-01-01T00:00:00.000Z' }]
       expect(await first.claimMemoryTurn('s:turn:1', events)).toBe('claimed')
       const second = new FileBridgeState(file)
-      expect(await second.listPendingMemoryTurns()).toEqual([{ key: 's:turn:1', events }])
+      expect(await second.listPendingMemoryTurns()).toEqual([{ key: 's:turn:1', events, leaseUntil: expect.any(String) }])
       await first.completeMemoryTurn('s:turn:1')
       expect(await second.listPendingMemoryTurns()).toEqual([])
       expect(await second.claimMemoryTurn('s:turn:1', events)).toBe('completed')

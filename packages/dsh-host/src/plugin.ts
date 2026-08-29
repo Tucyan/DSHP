@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
+import { createHostBridge, PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
 import { dirname, resolve } from 'node:path'
@@ -757,8 +757,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     let memoryRecoveryTimer: ReturnType<typeof setInterval> | undefined
     const started = (async () => {
       await pathValidation
-      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, verifiedObserverSink: observer => { observeVerified = observer }, onStartError: error => { process.nextTick(() => { throw error }) } })
-      await recoverPendingMemoryTurns()
+      const hostBridge = createHostBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { process.nextTick(() => { throw error }) } })
+      bridge = hostBridge.bridge
+      observeVerified = hostBridge.observeVerified
       await bridge.start()
       // A restart may happen before the old owner lease expires. Polling is
       // bounded and cancellable, so the pending turn is claimed as soon as
@@ -768,6 +769,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         maintenanceTasks.add(task)
         void task.finally(() => maintenanceTasks.delete(task)).catch(() => undefined)
       }, 1_000)
+      // Initial recovery is best effort: a transient MemoryService failure
+      // must not reject startup or prevent the retry scheduler from running.
+      const initialRecovery = recoverPendingMemoryTurns().catch(error => appendTrace({ type: 'memory_recovery', at: new Date().toISOString(), status: 'failure', reason: error instanceof Error ? error.message : 'recovery_failure' }))
+      maintenanceTasks.add(initialRecovery)
+      await initialRecovery.finally(() => maintenanceTasks.delete(initialRecovery))
     })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
     return async () => { if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); observeVerified = async () => undefined; bridge = undefined }

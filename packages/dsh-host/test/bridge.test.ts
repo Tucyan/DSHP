@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   PersonalGrowthBridge,
+  createHostBridge,
   sessionIdForPeer,
   type BridgeAgent,
   type BridgeAgentRegistry,
@@ -109,9 +110,8 @@ function state(): import('../src/bridge.js').BridgeState & { seen: Set<string>; 
 }
 
 function bridgeWithObserver(options: ConstructorParameters<typeof PersonalGrowthBridge>[0]): { bridge: PersonalGrowthBridge; observe: (event: BridgeSessionEvent) => Promise<void> } {
-  let observer: ((event: BridgeSessionEvent) => Promise<void>) | undefined
-  const bridge = new PersonalGrowthBridge({ ...options, verifiedObserverSink: value => { observer = value } })
-  return { bridge, observe: event => observer?.(event) ?? Promise.resolve() }
+  const host = createHostBridge(options)
+  return { bridge: host.bridge, observe: host.observeVerified }
 }
 
 describe('PersonalGrowthBridge', () => {
