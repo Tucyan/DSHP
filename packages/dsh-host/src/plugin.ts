@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createHostBridge, PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
+import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
 import { dirname, resolve } from 'node:path'
@@ -496,7 +496,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
   const scheduleCandidates = new Map<string, { text: string }>()
-  let observeVerified: (event: BridgeSessionEvent) => Promise<void> = async () => undefined
   const getHiddenAgent = async (role: 'decision' | 'dream' | 'maintenance'): Promise<BridgeAgent> => {
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
@@ -626,7 +625,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
           if (batch?.status !== 'completed') {
             await consumeDurableMemoryTurn(turnKey, sessionId, events)
           }
-          await observeVerified({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, source: 'heartbeat', stableKey: `${sessionId}:${input.occurrenceId}` })
         }
       }
     },
@@ -653,8 +651,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const occurrenceId = scheduleOccurrenceId(sessionId, turn)
     scheduleCandidates.set(occurrenceId, { text })
     try {
-      const result = await heartbeatService.wakeForeground({ occurrenceId, at, importance: 'normal' })
-      if (result.action?.type === 'MESSAGE_USER' && bridge) await observeVerified({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, source: 'heartbeat', stableKey: occurrenceId, at })
+      if (bridge) await bridge.runForegroundWake({ occurrenceId, at, importance: 1 })
     } finally {
       scheduleCandidates.delete(occurrenceId)
     }
@@ -742,7 +739,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const userMessageId = tracker.messageId(sessionId)
     const text = tracker.complete(sessionId, completed, memoryTask)
     if (completed && bridge && isUserOwnedTurn && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
-      void observeVerified({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, source: 'user', messageId: userMessageId, at: new Date(event.time).toISOString() }).catch(() => {
+      void bridge.observeActiveUserReply({ sessionId, text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, messageId: userMessageId, at: new Date(event.time).toISOString() }).catch(() => {
         void appendTrace({ type: 'outbound', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'observe_failure' }).catch(() => undefined)
       })
     }
@@ -755,20 +752,23 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   ctx.effect(() => {
     let memoryRecoveryTimer: ReturnType<typeof setInterval> | undefined
+    let disposed = false
     const started = (async () => {
       await pathValidation
-      const hostBridge = createHostBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { process.nextTick(() => { throw error }) } })
-      bridge = hostBridge.bridge
-      observeVerified = hostBridge.observeVerified
+      if (disposed) return
+      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { process.nextTick(() => { throw error }) } })
       await bridge.start()
+      if (disposed) { await bridge.stop(); return }
       // A restart may happen before the old owner lease expires. Polling is
       // bounded and cancellable, so the pending turn is claimed as soon as
       // it becomes safe instead of being stranded after one startup scan.
       memoryRecoveryTimer = setInterval(() => {
+        if (disposed) return
         const task = recoverPendingMemoryTurns().catch(error => appendTrace({ type: 'memory_recovery', at: new Date().toISOString(), status: 'failure', reason: error instanceof Error ? error.message : 'recovery_failure' }))
         maintenanceTasks.add(task)
         void task.finally(() => maintenanceTasks.delete(task)).catch(() => undefined)
       }, 1_000)
+      if (disposed) { clearInterval(memoryRecoveryTimer); memoryRecoveryTimer = undefined; return }
       // Initial recovery is best effort: a transient MemoryService failure
       // must not reject startup or prevent the retry scheduler from running.
       const initialRecovery = recoverPendingMemoryTurns().catch(error => appendTrace({ type: 'memory_recovery', at: new Date().toISOString(), status: 'failure', reason: error instanceof Error ? error.message : 'recovery_failure' }))
@@ -776,6 +776,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       await initialRecovery.finally(() => maintenanceTasks.delete(initialRecovery))
     })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); observeVerified = async () => undefined; bridge = undefined }
+    return async () => { disposed = true; if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await started.catch(() => undefined); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined }
   })
 }

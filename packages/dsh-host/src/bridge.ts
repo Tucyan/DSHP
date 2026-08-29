@@ -132,10 +132,6 @@ export function sessionIdForPeer(peerId: string): string {
   return `personal-growth-foreground-${digest}`
 }
 
-// Deliberately module-private: only the constructor callback can obtain this
-// capability, so an arbitrary session observer cannot become a QQ sender.
-const verifiedObserver = Symbol('personal-growth-verified-observer')
-
 function isNotFound(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   return (error as { code?: unknown }).code === 'NOT_FOUND'
@@ -182,7 +178,7 @@ export class PersonalGrowthBridge {
     })
     const cadence = this.options.cadence
     if (this.options.heartbeat && cadence?.foregroundMs && cadence.foregroundMs > 0) {
-      this.foregroundTimer = setInterval(() => this.trackWorker(this.options.heartbeat!.wakeForeground({ occurrenceId: this.occurrenceId('foreground'), importance: 0 })), cadence.foregroundMs)
+      this.foregroundTimer = setInterval(() => this.trackWorker(this.runForegroundWake({ occurrenceId: this.occurrenceId('foreground'), importance: 0 })), cadence.foregroundMs)
     }
     if (this.options.heartbeat && cadence?.backgroundMs && cadence.backgroundMs > 0) {
       this.backgroundTimer = setInterval(() => this.trackWorker(this.options.heartbeat!.wakeBackground({ occurrenceId: this.occurrenceId('background') })), cadence.backgroundMs)
@@ -204,17 +200,19 @@ export class PersonalGrowthBridge {
   /** Run one foreground proactive turn through the same durable foreground agent. */
   async runForegroundWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<void> {
     if (!this.started || !this.options.heartbeat) return
-    await this.options.heartbeat.wakeForeground(input)
+    const result = await this.options.heartbeat.wakeForeground(input) as { action?: { type?: string; text?: string } } | undefined
+    if (result?.action?.type === 'MESSAGE_USER' && result.action.text?.trim()) {
+      await this.sendOutbound(`${sessionIdForPeer(this.options.allowedPeerId)}:heartbeat:${input.occurrenceId}`, { peerId: this.options.allowedPeerId }, result.action.text)
+    }
   }
 
-  /** Called only through the module-private verified observer capability. */
-  [verifiedObserver](event: BridgeSessionEvent): Promise<void> {
-    const isCurrentUserTurn = event.source === 'user' && typeof event.messageId === 'string' && event.messageId === this.activeMessageIds.get(event.sessionId)
-    const isPolicyHeartbeat = event.source === 'heartbeat'
-    if (event.type === 'assistant/message' && (isCurrentUserTurn || isPolicyHeartbeat) && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
+  /** Sends only the assistant reply for the currently-owned QQ turn. */
+  observeActiveUserReply(event: { sessionId: string; seq?: number; text: string; at?: string; messageId?: string; completed?: boolean }): Promise<void> {
+    const isCurrentUserTurn = typeof event.messageId === 'string' && event.messageId === this.activeMessageIds.get(event.sessionId)
+    if (isCurrentUserTurn && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
       this.observed.set(event.sessionId, event.text)
-      const key = event.stableKey ?? `${event.sessionId}:${event.seq ?? event.text}`
-      const task = this.sendOutbound(key, { peerId: this.options.allowedPeerId, messageId: event.messageId ?? this.activeMessageIds.get(event.sessionId) }, event.text)
+      const key = `${event.sessionId}:turn:${event.messageId}`
+      const task = this.sendOutbound(key, { peerId: this.options.allowedPeerId, messageId: event.messageId }, event.text)
       this.trackWorker(task)
       return task
     }
@@ -386,10 +384,4 @@ export class PersonalGrowthBridge {
       return this.options.state?.trace?.(safe)
     }).then(() => undefined)
   }
-}
-
-/** @internal Host plugin wiring; intentionally omitted from the package index. */
-export function createHostBridge(options: PersonalGrowthBridgeOptions): { bridge: PersonalGrowthBridge; observeVerified: (event: BridgeSessionEvent) => Promise<void> } {
-  const bridge = new PersonalGrowthBridge(options)
-  return { bridge, observeVerified: event => bridge[verifiedObserver](event) }
 }

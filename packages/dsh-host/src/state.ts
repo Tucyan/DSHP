@@ -176,6 +176,7 @@ export class FileBridgeState implements BridgeState {
 
   listPendingMemoryTurns(): Promise<Array<{ key: string; events: ConversationEvent[]; leaseUntil?: string }>> {
     const run = this.queue.then(async () => {
+      await this.assertSafePath()
       const state = await this.read()
       return Object.entries(state.memoryTurns)
         .filter(([, value]) => value.status === 'pending')
