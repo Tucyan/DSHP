@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, parse } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
-import type { BridgeState, ConversationEvent } from './bridge.js'
+import type { BridgeState, ConversationEvent, MemoryTurnInput } from './bridge.js'
 import type { OutboundEnvelope } from './bridge.js'
 
 const MAX_ENTRIES = 10_000
@@ -62,7 +62,8 @@ function parseMemoryTurn(value: unknown): MemoryTurnRecord {
   if (!Array.isArray(object.events) || object.events.length < 1 || object.events.length > 100) throw new Error('Malformed memory turn events')
   const events = object.events.map(event => {
     const item = strictObject(event, ['sessionId', 'seq', 'role', 'content', 'at'])
-    if (typeof item.sessionId !== 'string' || item.sessionId.length < 1 || item.sessionId.length > MAX_ID || !Number.isInteger(item.seq) || Number(item.seq) < 1 || Number(item.seq) > MAX_SEQ || (item.role !== 'user' && item.role !== 'assistant') || typeof item.content !== 'string' || item.content.length < 1 || item.content.length > 20_000 || typeof item.at !== 'string' || !Number.isFinite(Date.parse(item.at))) throw new Error('Malformed memory turn event')
+    const eventTime = typeof item.at === 'string' ? Date.parse(item.at) : Number.NaN
+    if (typeof item.sessionId !== 'string' || item.sessionId.length < 1 || item.sessionId.length > MAX_ID || !Number.isInteger(item.seq) || Number(item.seq) < 1 || Number(item.seq) > MAX_SEQ || (item.role !== 'user' && item.role !== 'assistant') || typeof item.content !== 'string' || item.content.length < 1 || item.content.length > 20_000 || typeof item.at !== 'string' || !/T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(item.at) || !Number.isFinite(eventTime) || eventTime < Date.UTC(2000, 0, 1) || eventTime > Date.UTC(2100, 0, 1)) throw new Error('Malformed memory turn event')
     return item as unknown as ConversationEvent
   })
   return { ...object, events } as unknown as MemoryTurnRecord
@@ -135,9 +136,35 @@ export class FileBridgeState implements BridgeState {
       const record = state.memoryTurns[key]
       if (record?.status === 'completed') return 'completed' as const
       const now = Date.now()
+      if (record?.status === 'pending' && record.owner === this.owner) return 'pending' as const
       if (record?.status === 'pending' && record.owner !== this.owner && record.leaseUntil && Date.parse(record.leaseUntil) > now) return 'pending' as const
       state.memoryTurns[key] = checked
       return 'claimed' as const
+    })
+  }
+
+  claimMemoryTurnBatch(key: string, sessionId: string, events: readonly MemoryTurnInput[]): Promise<{ status: 'claimed' | 'completed' | 'pending'; events: ConversationEvent[] }> {
+    this.assertId(key)
+    this.assertId(sessionId)
+    if (!Array.isArray(events) || events.length < 1 || events.length > 100) throw new Error('Memory turn events exceed bounds')
+    for (const event of events) {
+      if (!event || typeof event !== 'object' || Array.isArray(event) || event.sessionId !== sessionId || !('role' in event) || !('content' in event) || !('at' in event)) throw new Error('Malformed memory turn input')
+    }
+    return this.update(state => {
+      const record = state.memoryTurns[key]
+      if (record?.status === 'completed') return { status: 'completed' as const, events: record.events }
+      const now = Date.now()
+      // A repeated event in the same process must not start a second consumer.
+      // Recovery is performed by a new owner after the lease is reclaimable.
+      if (record?.status === 'pending' && record.owner === this.owner) return { status: 'pending' as const, events: record.events }
+      if (record?.status === 'pending' && record.owner !== this.owner && record.leaseUntil && Date.parse(record.leaseUntil) > now) return { status: 'pending' as const, events: record.events }
+      const current = state.sequences[sessionId] ?? 0
+      if (current > MAX_SEQ - events.length) throw new Error('bridge sequence exceeds bounds')
+      const conversation = events.map((event, index) => ({ ...event, seq: current + index + 1 })) as ConversationEvent[]
+      const checked = parseMemoryTurn({ status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString(), events: conversation })
+      state.sequences[sessionId] = current + events.length
+      state.memoryTurns[key] = checked
+      return { status: 'claimed' as const, events: conversation }
     })
   }
 

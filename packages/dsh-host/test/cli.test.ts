@@ -3,6 +3,10 @@ import { resolve } from 'node:path'
 vi.mock('node:fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   writeFile: vi.fn().mockResolvedValue(undefined),
+  default: {
+    realpath: vi.fn().mockImplementation(async (value: string) => value),
+    lstat: vi.fn().mockResolvedValue({ isSymbolicLink: () => false }),
+  },
 }))
 vi.mock('../src/composition.js', () => ({
   bootPersonalGrowth: vi.fn().mockResolvedValue({ dispose: vi.fn().mockResolvedValue(undefined) }),
@@ -76,6 +80,9 @@ describe('personal growth host CLI configuration', () => {
     }, { liveQq: true })
     expect(boot).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       appId: 'appid', appSecret: 'secret', allowedPeerId: '12345',
+      workspaceRoot: resolve('workspace'),
+      agentsHome: resolve('runtime', 'agents-home'),
+      runtimeRoot: resolve('runtime'),
     }))
   })
 

@@ -28,7 +28,7 @@ export interface BridgeAgent {
   whenIdle(): Promise<void>
   /** Production adapters expose the session event log. Test doubles may omit it. */
   events?: () => readonly BridgeSessionEvent[]
-  /** Test-only fallback. Production output is observed through observeAgentEvent. */
+  /** Test-only fallback. Production output is observed through the host plugin. */
   reply?: string
   dispose?: () => Promise<void>
 }
@@ -51,6 +51,7 @@ export interface BridgeDream {
 }
 
 export type MemoryTurnClaim = 'claimed' | 'completed' | 'pending'
+export type MemoryTurnInput = Omit<ConversationEvent, 'seq'>
 
 /** Durable state is supplied by the production host; this prevents restart races. */
 export interface BridgeState {
@@ -60,6 +61,7 @@ export interface BridgeState {
   completeInbound?(messageId: string): Promise<void>
   failInbound?(messageId: string): Promise<void>
   claimMemoryTurn?(key: string, events: readonly ConversationEvent[]): Promise<MemoryTurnClaim>
+  claimMemoryTurnBatch?(key: string, sessionId: string, events: readonly MemoryTurnInput[]): Promise<{ status: MemoryTurnClaim; events: ConversationEvent[] }>
   listPendingMemoryTurns?(): Promise<Array<{ key: string; events: ConversationEvent[] }>>
   completeMemoryTurn?(key: string): Promise<void>
   failMemoryTurn?(key: string): Promise<void>
@@ -90,13 +92,14 @@ export interface BridgeSessionEvent {
   type: 'user/message' | 'assistant/message'
   text: string
   at?: string
-  source?: 'user' | 'agent' | 'plugin'
   /** The inbound QQ message currently owning this turn, when one exists. */
   messageId?: string
   /** Production adapters set this only after a completed turn boundary. */
   completed?: boolean
   /** Stable durable key for proactive messages whose source turn is hidden. */
   stableKey?: string
+  /** Only the host's verified QQ/schedule policy paths may request delivery. */
+  source?: 'user' | 'heartbeat'
 }
 
 export interface ConversationEvent {
@@ -128,6 +131,10 @@ export function sessionIdForPeer(peerId: string): string {
   const digest = createHash('sha256').update(peerId, 'utf8').digest('hex').slice(0, 24)
   return `personal-growth-foreground-${digest}`
 }
+
+// Deliberately module-private: only createVerifiedAgentObserver can obtain
+// this capability, so an arbitrary session observer cannot become a QQ sender.
+const verifiedObserver = Symbol('personal-growth-verified-observer')
 
 function isNotFound(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
@@ -200,9 +207,11 @@ export class PersonalGrowthBridge {
     await this.options.heartbeat.wakeForeground(input)
   }
 
-  /** Called by the host's public session/event listener. Background IDs are never registered. */
-  observeAgentEvent(event: BridgeSessionEvent): Promise<void> {
-    if (event.type === 'assistant/message' && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
+  /** Called only through the module-private verified observer capability. */
+  [verifiedObserver](event: BridgeSessionEvent): Promise<void> {
+    const isCurrentUserTurn = event.source === 'user' && this.activeMessageIds.has(event.sessionId)
+    const isPolicyHeartbeat = event.source === 'heartbeat'
+    if (event.type === 'assistant/message' && (isCurrentUserTurn || isPolicyHeartbeat) && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
       this.observed.set(event.sessionId, event.text)
       const key = event.stableKey ?? `${event.sessionId}:${event.seq ?? event.text}`
       const task = this.sendOutbound(key, { peerId: this.options.allowedPeerId, messageId: event.messageId ?? this.activeMessageIds.get(event.sessionId) }, event.text)
@@ -211,6 +220,7 @@ export class PersonalGrowthBridge {
     }
     return Promise.resolve()
   }
+
 
   private enqueue(message: BridgeInbound): Promise<void> {
     const operation = this.processing.then(async () => {
@@ -376,4 +386,9 @@ export class PersonalGrowthBridge {
       return this.options.state?.trace?.(safe)
     }).then(() => undefined)
   }
+}
+
+/** Returns the host-only observer capability; the bridge has no public generic send method. */
+export function createVerifiedAgentObserver(bridge: PersonalGrowthBridge): (event: BridgeSessionEvent) => Promise<void> {
+  return event => bridge[verifiedObserver](event)
 }

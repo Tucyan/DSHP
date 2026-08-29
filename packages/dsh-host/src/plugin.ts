@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat } from './bridge.js'
+import { createVerifiedAgentObserver, PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
 import { resolve } from 'node:path'
@@ -360,7 +360,7 @@ function createBot(config: DshHostConfig): BridgeBot {
   return {
     onMessage(handler) {
       qq.on('message', (_ctx, message) => {
-        void Promise.resolve(handler(inbound(message))).catch(error => {
+        void Promise.resolve().then(() => handler(inbound(message))).catch(error => {
           void Promise.resolve(config.onInboundError?.(error)).catch(() => undefined)
         })
       })
@@ -417,7 +417,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     if (JSON.stringify(safe).length > 4_096) throw new Error('host trace record exceeds bounds')
     await appendJsonl(tracePath, redactTrace(safe))
   }
-  const extensionWriter = new ExtensionWriter(agentsHome, runtimeRoot, tracePath)
+  // ExtensionWriter has its own runtime trace schema. Keep it in a separate
+  // file so the host trace reader never has to accept two incompatible shapes.
+  const extensionWriter = new ExtensionWriter(agentsHome, runtimeRoot, resolve(runtimeRoot, 'extension-trace.jsonl'))
   const toolDisposers = registerPersonalGrowthTools(toolRuntime, {
     agentsHome,
     proposals: resolve(runtimeRoot, 'plugin-proposals'),
@@ -427,6 +429,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
   const scheduleCandidates = new Map<string, { text: string }>()
+  let observeVerified: (event: BridgeSessionEvent) => Promise<void> = async () => undefined
   const getHiddenAgent = async (role: 'decision' | 'dream' | 'maintenance'): Promise<BridgeAgent> => {
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
@@ -525,9 +528,18 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       const result = await heartbeatService.wakeForeground({ occurrenceId: input.occurrenceId, at: input.at, importance: (input.importance ?? 0) >= 2 ? 'high' : 'low' })
       if (result.action?.type === 'MESSAGE_USER' && bridge) {
         const sessionId = sessionIdForPeer(allowedPeerId)
-        await memory.consume([{ sessionId, seq: await bridgeState.nextSequence(sessionId), role: 'assistant', content: result.action.text, at: input.at ?? heartbeatService.now() }])
-        await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
-        await bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, stableKey: `${sessionId}:${input.occurrenceId}` })
+        const turnKey = `${sessionId}:heartbeat:${input.occurrenceId}`
+        const inputEvent: MemoryTurnInput = { sessionId, role: 'assistant', content: result.action.text, at: input.at ?? heartbeatService.now() }
+        const batch = await bridgeState.claimMemoryTurnBatch?.(turnKey, sessionId, [inputEvent])
+        if (!batch || batch.status === 'claimed' || batch.status === 'completed') {
+          const events = batch?.events ?? [{ ...inputEvent, seq: await bridgeState.nextSequence(sessionId) }]
+          if (batch?.status !== 'completed') {
+            await memory.consume(events)
+            await bridgeState.completeMemoryTurn?.(turnKey)
+            await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
+          }
+          await observeVerified({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, source: 'heartbeat', stableKey: `${sessionId}:${input.occurrenceId}` })
+        }
       }
     },
     wakeBackground: async input => {
@@ -552,7 +564,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     scheduleCandidates.set(occurrenceId, { text })
     try {
       const result = await heartbeatService.wakeForeground({ occurrenceId, at, importance: 'normal' })
-      if (result.action?.type === 'MESSAGE_USER' && bridge) await bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, stableKey: occurrenceId, at })
+      if (result.action?.type === 'MESSAGE_USER' && bridge) await observeVerified({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, source: 'heartbeat', stableKey: occurrenceId, at })
     } finally {
       scheduleCandidates.delete(occurrenceId)
     }
@@ -572,10 +584,18 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
     }
     if (!messages.length) return
-    const conversation = []
-    for (const message of messages) conversation.push({ sessionId, seq: await bridgeState.nextSequence(sessionId), ...message })
-    const claim = await bridgeState.claimMemoryTurn?.(turnKey, conversation)
-    if (claim === 'completed' || claim === 'pending') return
+    const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, ...message }))
+    let conversation: ConversationEvent[]
+    if (bridgeState.claimMemoryTurnBatch) {
+      const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, inputs)
+      if (batch.status === 'completed' || batch.status === 'pending') return
+      conversation = batch.events
+    } else {
+      conversation = []
+      for (const message of inputs) conversation.push({ ...message, seq: await bridgeState.nextSequence(sessionId) })
+      const claim = await bridgeState.claimMemoryTurn?.(turnKey, conversation)
+      if (claim === 'completed' || claim === 'pending') return
+    }
     await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'started' })
     try {
       await memory.consume(conversation)
@@ -639,7 +659,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     }
     const text = tracker.complete(sessionId, completed, memoryTask)
     if (completed && bridge && isUserOwnedTurn && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
-      void bridge.observeAgentEvent({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, at: new Date(event.time).toISOString() }).catch(() => {
+      void observeVerified({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, source: 'user', at: new Date(event.time).toISOString() }).catch(() => {
         void appendTrace({ type: 'outbound', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'observe_failure' }).catch(() => undefined)
       })
     }
@@ -652,8 +672,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   ctx.effect(() => {
     bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: () => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' }) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { process.nextTick(() => { throw error }) } })
+    observeVerified = createVerifiedAgentObserver(bridge)
     const started = (async () => { await recoverPendingMemoryTurns(); await bridge!.start() })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined }
+    return async () => { await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); observeVerified = async () => undefined; bridge = undefined }
   })
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   PersonalGrowthBridge,
+  createVerifiedAgentObserver,
   sessionIdForPeer,
   type BridgeAgent,
   type BridgeAgentRegistry,
@@ -274,10 +275,27 @@ describe('PersonalGrowthBridge', () => {
     const qq = bot()
     const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: state(), allowedPeerId: 'user-1' })
     await bridge.start()
-    bridge.observeAgentEvent({ sessionId: sessionIdForPeer('user-1'), seq: 3, type: 'assistant/message', text: '主动跟进' })
-    bridge.observeAgentEvent({ sessionId: sessionIdForPeer('user-1'), seq: 3, type: 'assistant/message', text: '主动跟进' })
+    const observe = createVerifiedAgentObserver(bridge)
+    observe({ sessionId: sessionIdForPeer('user-1'), seq: 3, type: 'assistant/message', text: '主动跟进', source: 'heartbeat' })
+    observe({ sessionId: sessionIdForPeer('user-1'), seq: 3, type: 'assistant/message', text: '主动跟进', source: 'heartbeat' })
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(qq.sent).toEqual(['主动跟进'])
+    await bridge.stop()
+  })
+
+  it('does not expose a generic observer or allow an unverified event to send', async () => {
+    const qq = bot()
+    const bridge = new PersonalGrowthBridge({
+      bot: qq,
+      registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } },
+      memory: memory(),
+      allowedPeerId: 'user-1',
+    })
+    await bridge.start()
+    expect('observeAgentEvent' in bridge).toBe(false)
+    const observe = createVerifiedAgentObserver(bridge)
+    await observe({ sessionId: sessionIdForPeer('user-1'), type: 'assistant/message', text: '未经验证', completed: true, source: 'user' })
+    expect(qq.sent).toEqual([])
     await bridge.stop()
   })
 
@@ -288,7 +306,8 @@ describe('PersonalGrowthBridge', () => {
       const bridgeState = new FileBridgeState(join(root, 'bridge.json'))
       const bridge = new PersonalGrowthBridge({ bot: qq, registry: { async resume() { return agent('foreground') }, async create() { return agent('foreground') } }, memory: memory(), state: bridgeState, allowedPeerId: 'user-1' })
       await bridge.start()
-      await expect(bridge.observeAgentEvent({ sessionId: sessionIdForPeer('user-1'), seq: 7, type: 'assistant/message', text: '一次主动消息' })).rejects.toThrow(/unknown/)
+      const observe = createVerifiedAgentObserver(bridge)
+      await expect(observe({ sessionId: sessionIdForPeer('user-1'), seq: 7, type: 'assistant/message', text: '一次主动消息', source: 'heartbeat' })).rejects.toThrow(/unknown/)
       expect(await new FileBridgeState(join(root, 'bridge.json')).claimOutbound(`${sessionIdForPeer('user-1')}:7`)).toBe('unknown')
       await bridge.stop()
     } finally { await rm(root, { recursive: true, force: true }) }

@@ -120,6 +120,24 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('allocates a contiguous memory-turn batch and claims it atomically', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-memory-batch-'))
+    try {
+      const state = new FileBridgeState(join(root, 'bridge.json'))
+      const inputs = [
+        { sessionId: 's', role: 'user' as const, content: 'one', at: '2026-01-01T00:00:00.000Z' },
+        { sessionId: 's', role: 'assistant' as const, content: 'two', at: '2026-01-01T00:00:01.000Z' },
+      ]
+      const first = await state.claimMemoryTurnBatch('s:turn:1', 's', inputs)
+      expect(first.status).toBe('claimed')
+      expect(first.events.map(event => event.seq)).toEqual([1, 2])
+      const duplicate = await state.claimMemoryTurnBatch('s:turn:1', 's', inputs)
+      expect(duplicate.status).toBe('pending')
+      expect(duplicate.events).toEqual(first.events)
+      expect(await state.nextSequence('s')).toBe(3)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('uses durable outbound pending and sent states with explicit reconcile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
     try {

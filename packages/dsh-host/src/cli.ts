@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { bootPersonalGrowth } from './composition.js'
+import { resolveIsolatedPaths, validateIsolatedPathsAsync } from '@personal-growth/dsh-adapter'
 
 export function resolveProjectRoot(env: NodeJS.ProcessEnv = process.env, moduleUrl = import.meta.url): string {
   const configured = env.PGA_REPO_ROOT?.trim()
@@ -56,13 +57,17 @@ export async function runPersonalGrowthHost(env: NodeJS.ProcessEnv = process.env
   const liveQq = options.liveQq ?? process.argv.includes('--live-qq')
   if (!liveQq) throw new Error('Personal growth host CLI requires --live-qq; non-live mode is not supported.')
   const projectRoot = resolveProjectRoot(env)
-  if (!env.DSH_HOME?.trim()) env.DSH_HOME = join(projectRoot, 'runtime', 'dsh-home')
-  if (!env.DSH_AGENTS_HOME?.trim()) env.DSH_AGENTS_HOME = join(projectRoot, 'runtime', 'agents-home')
-  const workspace = resolvePersonalGrowthWorkspace(env)
+  const isolated = resolveIsolatedPaths(projectRoot)
+  // Validate before creating any profile/config file. This rejects home
+  // defaults, external paths and symlink/junction escapes at the CLI boundary.
+  await validateIsolatedPathsAsync(isolated)
+  env.DSH_HOME = isolated.dshHome
+  env.DSH_AGENTS_HOME = isolated.agentsHome
+  const workspace = isolated.workspace
   env.PERSONAL_GROWTH_WORKSPACE = workspace
   env.DSH_WORKSPACE = workspace
   const qqConfig = normalizeLiveQqConfig({ peerId: env.QQBOT_ALLOWED_PEER_ID, appId: env.QQBOT_APP_ID, appSecret: env.QQBOT_APP_SECRET })
-  const configPath = getPersonalGrowthConfigPath(env)
+  const configPath = join(isolated.dshHome, 'profiles', 'personal-growth', 'cordis.yml')
   await mkdir(resolve(configPath, '..'), { recursive: true })
   await writeFile(configPath, '[]\n', { flag: 'wx' }).catch(error => {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -72,6 +77,9 @@ export async function runPersonalGrowthHost(env: NodeJS.ProcessEnv = process.env
     appSecret: qqConfig.appSecret,
     allowedPeerId: qqConfig.peerId,
     accountId: env.QQBOT_ACCOUNT_ID,
+    workspaceRoot: isolated.workspace,
+    agentsHome: isolated.agentsHome,
+    runtimeRoot: join(isolated.root, 'runtime'),
   })
   const dispose = (ctx as unknown as { dispose?: () => Promise<void> }).dispose
   if (!dispose) throw new Error('DSH boot context does not expose public dispose()')

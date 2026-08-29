@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import { buildHostPatch, assertRequiredComposition } from '../src/composition.js'
+import * as publicApi from '../src/index.js'
 
 describe('DSH host composition contract', () => {
   it('uses an insert patch for schedule and host, preserving public DSH composition semantics', () => {
@@ -13,5 +14,9 @@ describe('DSH host composition contract', () => {
 
   it('fails closed when the schedule row is absent', () => {
     expect(() => assertRequiredComposition([{ id: 'personal-growth-host', name: '@personal-growth/dsh-host' }])).toThrow(/schedule/)
+  })
+
+  it('does not publish the internal event-to-QQ observer factory', () => {
+    expect('createVerifiedAgentObserver' in publicApi).toBe(false)
   })
 })
