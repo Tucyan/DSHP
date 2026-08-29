@@ -19,7 +19,7 @@ export interface BridgeBot {
   stop(): void | Promise<void>
 }
 
-export interface BridgeAgentMessage { text: string; source?: string }
+export interface BridgeAgentMessage { text: string; source?: string; messageId?: string }
 
 export interface BridgeAgent {
   id: string
@@ -62,7 +62,7 @@ export interface BridgeState {
   failInbound?(messageId: string): Promise<void>
   claimMemoryTurn?(key: string, events: readonly ConversationEvent[]): Promise<MemoryTurnClaim>
   claimMemoryTurnBatch?(key: string, sessionId: string, events: readonly MemoryTurnInput[]): Promise<{ status: MemoryTurnClaim; events: ConversationEvent[] }>
-  listPendingMemoryTurns?(): Promise<Array<{ key: string; events: ConversationEvent[] }>>
+  listPendingMemoryTurns?(): Promise<Array<{ key: string; events: ConversationEvent[]; leaseUntil?: string }>>
   completeMemoryTurn?(key: string): Promise<void>
   failMemoryTurn?(key: string): Promise<void>
   claimHistory?(historyId: string): Promise<boolean>
@@ -124,6 +124,8 @@ export interface PersonalGrowthBridgeOptions {
   onStartError?: (error: unknown) => void
   /** Production DSH session observers own the single consume/Dream pipeline. */
   processMemory?: boolean
+  /** Internal host wiring; never exposed as a generic public event sender. */
+  verifiedObserverSink?: (observer: (event: BridgeSessionEvent) => Promise<void>) => void
   trace?: (record: { type: string; at: string; key?: string; status?: string; reason?: string }) => void | Promise<void>
 }
 
@@ -132,8 +134,8 @@ export function sessionIdForPeer(peerId: string): string {
   return `personal-growth-foreground-${digest}`
 }
 
-// Deliberately module-private: only createVerifiedAgentObserver can obtain
-// this capability, so an arbitrary session observer cannot become a QQ sender.
+// Deliberately module-private: only the constructor callback can obtain this
+// capability, so an arbitrary session observer cannot become a QQ sender.
 const verifiedObserver = Symbol('personal-growth-verified-observer')
 
 function isNotFound(error: unknown): boolean {
@@ -162,6 +164,7 @@ export class PersonalGrowthBridge {
 
   constructor(options: PersonalGrowthBridgeOptions) {
     this.options = options
+    options.verifiedObserverSink?.(event => this[verifiedObserver](event))
   }
 
   async start(): Promise<void> {
@@ -209,7 +212,7 @@ export class PersonalGrowthBridge {
 
   /** Called only through the module-private verified observer capability. */
   [verifiedObserver](event: BridgeSessionEvent): Promise<void> {
-    const isCurrentUserTurn = event.source === 'user' && this.activeMessageIds.has(event.sessionId)
+    const isCurrentUserTurn = event.source === 'user' && typeof event.messageId === 'string' && event.messageId === this.activeMessageIds.get(event.sessionId)
     const isPolicyHeartbeat = event.source === 'heartbeat'
     if (event.type === 'assistant/message' && (isCurrentUserTurn || isPolicyHeartbeat) && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
       this.observed.set(event.sessionId, event.text)
@@ -279,7 +282,7 @@ export class PersonalGrowthBridge {
       const before = agent.events?.() ?? []
       this.observed.delete(sessionId)
       this.activeMessageIds.set(sessionId, message.messageId)
-      agent.followup({ text: message.text, source: 'user' })
+    agent.followup({ text: message.text, source: 'user', messageId: message.messageId })
       await agent.whenIdle()
       await ensureLease()
       const after = agent.events?.() ?? []
@@ -386,9 +389,4 @@ export class PersonalGrowthBridge {
       return this.options.state?.trace?.(safe)
     }).then(() => undefined)
   }
-}
-
-/** Returns the host-only observer capability; the bridge has no public generic send method. */
-export function createVerifiedAgentObserver(bridge: PersonalGrowthBridge): (event: BridgeSessionEvent) => Promise<void> {
-  return event => bridge[verifiedObserver](event)
 }

@@ -138,6 +138,20 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('requeues a failed memory turn with the same durable sequence for retry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-memory-retry-'))
+    try {
+      const state = new FileBridgeState(join(root, 'bridge.json'))
+      const input = [{ sessionId: 's', role: 'user' as const, content: 'retry me', at: '2026-01-01T00:00:00.000Z' }]
+      const first = await state.claimMemoryTurnBatch('s:turn:retry', 's', input)
+      await state.failMemoryTurn('s:turn:retry')
+      const retry = await state.claimMemoryTurnBatch('s:turn:retry', 's', input)
+      expect(retry.status).toBe('claimed')
+      expect(retry.events).toEqual(first.events)
+      expect(await state.nextSequence('s')).toBe(2)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('uses durable outbound pending and sent states with explicit reconcile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
     try {

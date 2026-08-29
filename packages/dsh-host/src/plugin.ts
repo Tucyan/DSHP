@@ -3,10 +3,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createVerifiedAgentObserver, PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
+import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type BridgeSessionEvent, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { lstatSync, realpathSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -14,6 +15,7 @@ import { AgentActionSchema, assertActionAllowedForTrigger, type AgentAction, typ
 import { HeartbeatService, parseHeartbeatConfig, type HeartbeatConfig } from '@personal-growth/personal-heartbeat'
 import { DreamService, HistoryRecordSchema, ProposalSchema } from '@personal-growth/personal-memory'
 import { ExtensionWriter } from '@personal-growth/runtime'
+import { resolveIsolatedPaths, validateIsolatedPaths, validateIsolatedPathsAsync, type IsolatedPaths } from '@personal-growth/dsh-adapter'
 
 export const name = 'personal-growth-dsh-host'
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'tools']
@@ -36,6 +38,64 @@ export interface DshHostConfig {
   /** Injectable only for contract tests; deployment uses ctx.agents. */
   registry?: BridgeAgentRegistry
   onInboundError?: (error: unknown) => void | Promise<void>
+}
+
+export interface ValidatedHostPaths {
+  repoRoot: string
+  workspaceRoot: string
+  agentsHome: string
+  runtimeRoot: string
+  isolated: IsolatedPaths
+}
+
+function nearestExistingSync(value: string): string {
+  let current = resolve(value)
+  while (true) {
+    try { return resolve(realpathSync(current)) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(current)
+      if (parent === current) throw error
+      current = parent
+    }
+  }
+}
+
+function assertCanonicalHostPaths(paths: IsolatedPaths): void {
+  const root = nearestExistingSync(paths.root).toLowerCase()
+  for (const target of [paths.root, paths.dshHome, paths.agentsHome, paths.workspace, paths.plugins, paths.skills, paths.sessions, paths.storage, paths.credentials]) {
+    const canonical = nearestExistingSync(target).toLowerCase()
+    if (canonical !== root && !canonical.startsWith(`${root}\\`)) throw new Error('isolated path resolves outside repository')
+    let current = resolve(target)
+    while (current.toLowerCase() !== resolve(paths.root).toLowerCase()) {
+      try { if (lstatSync(current).isSymbolicLink()) throw new Error('isolated host paths may not contain symlinks or junctions') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const parent = dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+}
+
+/** Normalize the deployment roots and reject path drift before any host work. */
+export function normalizeHostPaths(config: Pick<DshHostConfig, 'workspaceRoot' | 'agentsHome' | 'runtimeRoot'>, env: NodeJS.ProcessEnv = process.env): ValidatedHostPaths {
+  const configuredWorkspace = config.workspaceRoot ?? env.PERSONAL_GROWTH_WORKSPACE ?? env.DSH_WORKSPACE
+  if (!configuredWorkspace?.trim()) throw new Error('personal-growth-dsh-host requires an isolated workspaceRoot')
+  const workspaceRoot = resolve(configuredWorkspace)
+  const runtimeRoot = resolve(config.runtimeRoot ?? resolve(workspaceRoot, '..', 'runtime'))
+  const repoRoot = resolve(runtimeRoot, '..')
+  const agentsHome = resolve(config.agentsHome ?? resolve(runtimeRoot, 'agents-home'))
+  const isolated = resolveIsolatedPaths(repoRoot)
+  const defaults = [env.USERPROFILE, env.HOME].filter((value): value is string => Boolean(value)).flatMap(home => [resolve(home, '.dsh'), resolve(home, '.agents')])
+  if ([repoRoot, workspaceRoot, runtimeRoot, agentsHome].some(candidate => defaults.some(item => {
+    const normalizedCandidate = candidate.toLowerCase()
+    const normalizedItem = item.toLowerCase()
+    return normalizedCandidate === normalizedItem || normalizedCandidate.startsWith(`${normalizedItem}\\`)
+  }))) throw new Error('isolated host path must not equal or be inside the default home')
+  if (workspaceRoot !== isolated.workspace || runtimeRoot !== resolve(repoRoot, 'runtime') || agentsHome !== isolated.agentsHome) throw new Error('host paths must use the project isolated workspace and runtime roots')
+  validateIsolatedPaths(isolated)
+  assertCanonicalHostPaths(isolated)
+  return { repoRoot, workspaceRoot, agentsHome, runtimeRoot, isolated }
 }
 
 export interface DshSessionPersistence {
@@ -92,7 +152,7 @@ export function captureCompletedTurn(events: readonly { seq: number; type: strin
 }
 
 export interface DshToolRegistrar { register(definition: ToolDefinition): () => void }
-export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter }
+export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter; ready?: Promise<void> }
 
 function safeSlug(value: string): string {
   const slug = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
@@ -144,6 +204,7 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       render: (_args, value) => resultToolOutput(value),
     },
     async execute(args) {
+      await paths.ready
       const slug = safeSlug(args.name)
       if (paths.extensionWriter) {
         const result = await paths.extensionWriter.createSkill({ name: slug, description: `Use when working on ${slug}.`, instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${args.instructions}\n\nStop:\nStop when the requested skill action is complete.`, positiveTriggers: [slug], negativeTriggers: ['unrelated request'] })
@@ -169,6 +230,7 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       render: (_args, value) => resultToolOutput(value),
     },
     async execute(args) {
+      await paths.ready
       if (paths.extensionWriter) {
         const result = await paths.extensionWriter.proposePlugin({ name: safeSlug(args.name), capabilityGap: args.rationale, design: `${args.capabilities.join('; ')}\n\nRisks:\n${args.risks}` })
         return { accepted: true, path: result.path }
@@ -189,6 +251,7 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       render: (_args, value) => [{ type: 'text', text: value.accepted ? 'memory proposal applied' : 'memory proposal rejected' }],
     },
     async execute(args) {
+      await paths.ready
       if (!paths.memoryApply) throw new Error('personal_memory_apply is unavailable in this host')
       const result = await paths.memoryApply(ProposalSchema.parse(args.proposal)) as { accepted?: boolean }
       return { accepted: result.accepted === true }
@@ -244,22 +307,23 @@ function inbound(message: QQBotInboundMessage): BridgeInbound {
 }
 
 interface CompletionTracker {
-  begin(agentId: string): void
+  begin(agentId: string, messageId?: string): void
   has(agentId: string): boolean
   assistant(agentId: string, text: string): void
   complete(agentId: string, ok: boolean, durableTask?: Promise<void>): string | undefined
+  messageId(agentId: string): string | undefined
   wait(agentId: string): Promise<string | undefined>
 }
 
 function completionTracker(): CompletionTracker {
-  const pending = new Map<string, { text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
+  const pending = new Map<string, { messageId?: string; text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
   return {
-    begin(agentId) {
+    begin(agentId, messageId) {
       if (pending.has(agentId)) throw new Error(`agent ${agentId} already has a pending turn`)
       let resolve!: (text: string | undefined) => void
       let reject!: (error: unknown) => void
       const promise = new Promise<string | undefined>((done, fail) => { resolve = done; reject = fail })
-      pending.set(agentId, { promise, resolve, reject })
+      pending.set(agentId, { messageId, promise, resolve, reject })
     },
     has(agentId) { return pending.has(agentId) },
     assistant(agentId, text) {
@@ -276,6 +340,7 @@ function completionTracker(): CompletionTracker {
       } else turn.resolve(text)
       return text
     },
+    messageId(agentId) { return pending.get(agentId)?.messageId },
     wait(agentId) {
       return pending.get(agentId)?.promise ?? Promise.resolve(undefined)
     },
@@ -291,7 +356,7 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
       agent.inject(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'plugin', plugin: 'personal-growth-dsh-host', form: 'snapshot', sections: [{ name: 'context', text: message.text }] } }))
     },
     followup(message) {
-      tracker?.begin(String(agent.id))
+      tracker?.begin(String(agent.id), message.messageId)
       agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'user' } }))
     },
     whenIdle: async () => {
@@ -378,10 +443,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const appSecret = config?.appSecret ?? process.env.QQBOT_APP_SECRET
   const allowedPeerId = config?.allowedPeerId ?? process.env.QQBOT_ALLOWED_PEER_ID
   if (!appId || !appSecret || !allowedPeerId) throw new Error('personal-growth-dsh-host requires QQ credentials and allowedPeerId')
-  const workspaceRoot = config.workspaceRoot ?? process.env.PERSONAL_GROWTH_WORKSPACE
-  if (!workspaceRoot) throw new Error('personal-growth-dsh-host requires an isolated workspaceRoot')
-  const agentsHome = config.agentsHome ?? process.env.DSH_AGENTS_HOME ?? resolve(workspaceRoot, 'runtime', 'agents-home')
-  const runtimeRoot = config.runtimeRoot ?? resolve(workspaceRoot, 'runtime')
+  const hostPaths = normalizeHostPaths(config)
+  const { workspaceRoot, agentsHome, runtimeRoot, isolated } = hostPaths
+  // Symlink/junction checks are necessarily asynchronous. The effect below
+  // awaits this promise before recovery, bot start, or any writer can run.
+  const pathValidation = validateIsolatedPathsAsync(isolated)
   const service = new MemoryService({
     workspaceRoot,
     compressor: { compress: events => events.map(event => `${event.role}: ${event.content}`).join(' | ') },
@@ -424,6 +490,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     agentsHome,
     proposals: resolve(runtimeRoot, 'plugin-proposals'),
     extensionWriter,
+    ready: pathValidation,
     memoryApply: proposal => memory.apply(proposal),
   })
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
@@ -455,6 +522,27 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     },
   })
   const dreamAdapter: BridgeDream = dream ?? { propose: input => dreamService.dream(input) }
+  const consumeDurableMemoryTurn = async (key: string, sessionId: string, initial: ConversationEvent[]): Promise<void> => {
+    let events = initial
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await memory.consume(events)
+        await bridgeState.completeMemoryTurn?.(key)
+        await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
+        return
+      } catch (error) {
+        await bridgeState.failMemoryTurn?.(key)
+        await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'retry', reason: attempt < 2 ? 'consumer_failure' : 'retry_exhausted' })
+        if (attempt >= 2) throw error
+        await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)))
+        const retryInputs: MemoryTurnInput[] = events.map(event => ({ sessionId: event.sessionId, role: event.role, content: event.content, at: event.at }))
+        const retry = await bridgeState.claimMemoryTurnBatch?.(key, sessionId, retryInputs)
+        if (!retry || retry.status === 'pending') throw error
+        if (retry.status === 'completed') return
+        events = retry.events
+      }
+    }
+  }
   const heartbeatService = new HeartbeatService({
     workspace: workspaceRoot,
     config: config.heartbeatConfig ?? buildHeartbeatConfig(),
@@ -525,24 +613,25 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   const heartbeat: BridgeHeartbeat = config.heartbeat ?? {
     wakeForeground: async input => {
+      await pathValidation
       const result = await heartbeatService.wakeForeground({ occurrenceId: input.occurrenceId, at: input.at, importance: (input.importance ?? 0) >= 2 ? 'high' : 'low' })
       if (result.action?.type === 'MESSAGE_USER' && bridge) {
         const sessionId = sessionIdForPeer(allowedPeerId)
         const turnKey = `${sessionId}:heartbeat:${input.occurrenceId}`
         const inputEvent: MemoryTurnInput = { sessionId, role: 'assistant', content: result.action.text, at: input.at ?? heartbeatService.now() }
-        const batch = await bridgeState.claimMemoryTurnBatch?.(turnKey, sessionId, [inputEvent])
-        if (!batch || batch.status === 'claimed' || batch.status === 'completed') {
-          const events = batch?.events ?? [{ ...inputEvent, seq: await bridgeState.nextSequence(sessionId) }]
+        if (!bridgeState.claimMemoryTurnBatch) throw new Error('personal-growth-dsh-host requires atomic memory-turn claims')
+        const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, [inputEvent])
+        if (batch.status === 'claimed' || batch.status === 'completed') {
+          const events = batch.events
           if (batch?.status !== 'completed') {
-            await memory.consume(events)
-            await bridgeState.completeMemoryTurn?.(turnKey)
-            await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
+            await consumeDurableMemoryTurn(turnKey, sessionId, events)
           }
           await observeVerified({ sessionId, type: 'assistant/message', text: result.action.text, completed: true, source: 'heartbeat', stableKey: `${sessionId}:${input.occurrenceId}` })
         }
       }
     },
     wakeBackground: async input => {
+      await pathValidation
       const result = await heartbeatService.wakeBackground({ occurrenceId: input.occurrenceId, at: input.at })
       const action = result.action
       if (action?.type === 'CREATE_SKILL') {
@@ -560,6 +649,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   let bridge: PersonalGrowthBridge | undefined
   const dispatchScheduleCandidate = async (sessionId: string, turn: number, text: string, at: string): Promise<void> => {
+    await pathValidation
     const occurrenceId = scheduleOccurrenceId(sessionId, turn)
     scheduleCandidates.set(occurrenceId, { text })
     try {
@@ -585,22 +675,13 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     }
     if (!messages.length) return
     const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, ...message }))
-    let conversation: ConversationEvent[]
-    if (bridgeState.claimMemoryTurnBatch) {
-      const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, inputs)
-      if (batch.status === 'completed' || batch.status === 'pending') return
-      conversation = batch.events
-    } else {
-      conversation = []
-      for (const message of inputs) conversation.push({ ...message, seq: await bridgeState.nextSequence(sessionId) })
-      const claim = await bridgeState.claimMemoryTurn?.(turnKey, conversation)
-      if (claim === 'completed' || claim === 'pending') return
-    }
+    if (!bridgeState.claimMemoryTurnBatch) throw new Error('personal-growth-dsh-host requires atomic memory-turn claims')
+    const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, inputs)
+    if (batch.status === 'completed' || batch.status === 'pending') return
+    const conversation: ConversationEvent[] = batch.events
     await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'started' })
     try {
-      await memory.consume(conversation)
-      await bridgeState.completeMemoryTurn?.(turnKey)
-      await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'completed' })
+      await consumeDurableMemoryTurn(turnKey, sessionId, conversation)
     } catch (error) {
       await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'pending', reason: 'retry_required' })
       throw error
@@ -609,6 +690,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const recoverPendingMemoryTurns = async (): Promise<void> => {
     const pending = await bridgeState.listPendingMemoryTurns?.() ?? []
     for (const item of pending) {
+      if (item.leaseUntil && Date.parse(item.leaseUntil) > Date.now()) continue
       const claim = await bridgeState.claimMemoryTurn?.(item.key, item.events)
       if (claim !== 'claimed') continue
       try {
@@ -651,15 +733,16 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const isScheduleTurn = source?.kind === 'plugin' && source.plugin !== name && /schedule/i.test(source.plugin ?? '')
     const isUserOwnedTurn = source?.kind === 'user'
     const memoryTask = completed && sessionId === foregroundSessionId
-      ? consumeStandaloneTurn(sessionId, eventsForTurn, `${sessionId}:turn:${event.data.turn}`)
+      ? pathValidation.then(() => consumeStandaloneTurn(sessionId, eventsForTurn, `${sessionId}:turn:${event.data.turn}`))
       : undefined
     if (memoryTask) {
       maintenanceTasks.add(memoryTask)
       void memoryTask.finally(() => maintenanceTasks.delete(memoryTask)).catch(() => undefined)
     }
+    const userMessageId = tracker.messageId(sessionId)
     const text = tracker.complete(sessionId, completed, memoryTask)
     if (completed && bridge && isUserOwnedTurn && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
-      void observeVerified({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, source: 'user', at: new Date(event.time).toISOString() }).catch(() => {
+      void observeVerified({ sessionId, type: 'assistant/message', text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, source: 'user', messageId: userMessageId, at: new Date(event.time).toISOString() }).catch(() => {
         void appendTrace({ type: 'outbound', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'observe_failure' }).catch(() => undefined)
       })
     }
@@ -671,10 +754,22 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     activeTurns.delete(sessionId)
   })
   ctx.effect(() => {
-    bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: () => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' }) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { process.nextTick(() => { throw error }) } })
-    observeVerified = createVerifiedAgentObserver(bridge)
-    const started = (async () => { await recoverPendingMemoryTurns(); await bridge!.start() })()
+    let memoryRecoveryTimer: ReturnType<typeof setInterval> | undefined
+    const started = (async () => {
+      await pathValidation
+      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, verifiedObserverSink: observer => { observeVerified = observer }, onStartError: error => { process.nextTick(() => { throw error }) } })
+      await recoverPendingMemoryTurns()
+      await bridge.start()
+      // A restart may happen before the old owner lease expires. Polling is
+      // bounded and cancellable, so the pending turn is claimed as soon as
+      // it becomes safe instead of being stranded after one startup scan.
+      memoryRecoveryTimer = setInterval(() => {
+        const task = recoverPendingMemoryTurns().catch(error => appendTrace({ type: 'memory_recovery', at: new Date().toISOString(), status: 'failure', reason: error instanceof Error ? error.message : 'recovery_failure' }))
+        maintenanceTasks.add(task)
+        void task.finally(() => maintenanceTasks.delete(task)).catch(() => undefined)
+      }, 1_000)
+    })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); observeVerified = async () => undefined; bridge = undefined }
+    return async () => { if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); observeVerified = async () => undefined; bridge = undefined }
   })
 }

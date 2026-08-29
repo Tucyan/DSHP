@@ -136,8 +136,11 @@ export class FileBridgeState implements BridgeState {
       const record = state.memoryTurns[key]
       if (record?.status === 'completed') return 'completed' as const
       const now = Date.now()
-      if (record?.status === 'pending' && record.owner === this.owner) return 'pending' as const
-      if (record?.status === 'pending' && record.owner !== this.owner && record.leaseUntil && Date.parse(record.leaseUntil) > now) return 'pending' as const
+      if (record?.status === 'pending' && record.leaseUntil && Date.parse(record.leaseUntil) > now) return 'pending' as const
+      if (record?.status === 'pending') {
+        state.memoryTurns[key] = { ...record, owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString() }
+        return 'claimed' as const
+      }
       state.memoryTurns[key] = checked
       return 'claimed' as const
     })
@@ -156,8 +159,11 @@ export class FileBridgeState implements BridgeState {
       const now = Date.now()
       // A repeated event in the same process must not start a second consumer.
       // Recovery is performed by a new owner after the lease is reclaimable.
-      if (record?.status === 'pending' && record.owner === this.owner) return { status: 'pending' as const, events: record.events }
-      if (record?.status === 'pending' && record.owner !== this.owner && record.leaseUntil && Date.parse(record.leaseUntil) > now) return { status: 'pending' as const, events: record.events }
+      if (record?.status === 'pending' && record.leaseUntil && Date.parse(record.leaseUntil) > now) return { status: 'pending' as const, events: record.events }
+      if (record?.status === 'pending') {
+        state.memoryTurns[key] = { ...record, owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString() }
+        return { status: 'claimed' as const, events: record.events }
+      }
       const current = state.sequences[sessionId] ?? 0
       if (current > MAX_SEQ - events.length) throw new Error('bridge sequence exceeds bounds')
       const conversation = events.map((event, index) => ({ ...event, seq: current + index + 1 })) as ConversationEvent[]
@@ -168,7 +174,7 @@ export class FileBridgeState implements BridgeState {
     })
   }
 
-  listPendingMemoryTurns(): Promise<Array<{ key: string; events: ConversationEvent[] }>> {
+  listPendingMemoryTurns(): Promise<Array<{ key: string; events: ConversationEvent[]; leaseUntil?: string }>> {
     return this.update(state => Object.entries(state.memoryTurns).filter(([, value]) => value.status === 'pending').map(([key, value]) => ({ key, events: value.events })))
   }
 
@@ -184,7 +190,10 @@ export class FileBridgeState implements BridgeState {
 
   failMemoryTurn(key: string): Promise<void> {
     this.assertId(key)
-    return this.update(state => { if (state.memoryTurns[key]?.owner === this.owner) delete state.memoryTurns[key] })
+    return this.update(state => {
+      const record = state.memoryTurns[key]
+      if (record?.owner === this.owner && record.status === 'pending') record.leaseUntil = new Date(0).toISOString()
+    })
   }
 
   claimHistory(historyId: string): Promise<boolean> {

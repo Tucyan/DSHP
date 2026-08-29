@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { apply, captureCompletedTurn, registerPersonalGrowthTools, type DshToolRegistrar } from '../src/plugin.js'
 import { sessionIdForPeer } from '../src/bridge.js'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,7 +22,11 @@ describe('production host critical contracts', () => {
   })
 
   it('consumes only the fixed foreground session while retaining schedule plugin prompts', async () => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'pga-host-events-'))
+    const projectRoot = await mkdtemp(join(tmpdir(), 'pga-host-events-'))
+    const workspaceRoot = join(projectRoot, 'workspace')
+    const runtimeRoot = join(projectRoot, 'runtime')
+    const agentsHome = join(runtimeRoot, 'agents-home')
+    await mkdir(workspaceRoot, { recursive: true })
     try {
     const consumed: unknown[][] = []
     let listener: ((session: { id: string }, event: unknown) => void) | undefined
@@ -36,7 +40,7 @@ describe('production host critical contracts', () => {
       effect(factory: () => () => Promise<void>) { cleanup = factory() },
     } as never, {
       appId: 'app', appSecret: 'secret', allowedPeerId: 'peer', bot,
-      workspaceRoot,
+      workspaceRoot, runtimeRoot, agentsHome,
       registry: { async resume() { throw new Error('not used') }, async create() { throw new Error('not used') } },
       memory: {
         async readProfile() { return '' }, async search() { return [] }, async readIndex() { return '' },
@@ -57,6 +61,6 @@ describe('production host critical contracts', () => {
     await new Promise(resolve => setTimeout(resolve, 1_000))
     expect(consumed.flat().map(event => (event as { content: string }).content)).toEqual(['scheduled prompt', 'scheduled reply'])
     await cleanup?.()
-    } finally { await rm(workspaceRoot, { recursive: true, force: true }) }
+    } finally { await rm(projectRoot, { recursive: true, force: true }) }
   })
 })
