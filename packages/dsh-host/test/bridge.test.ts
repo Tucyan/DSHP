@@ -7,7 +7,6 @@ import {
   type BridgeBot,
   type BridgeInbound,
   type BridgeMemory,
-  type BridgeDream,
 } from '../src/bridge.js'
 
 function inbound(overrides: Partial<BridgeInbound> = {}): BridgeInbound {

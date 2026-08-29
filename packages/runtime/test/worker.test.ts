@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRuntime, type WorkerOptions } from '../src/runtime.js';
@@ -19,5 +19,19 @@ describe('runtime worker', () => {
     const done = runtime.start({ cadenceMs: 1, wait: async () => wait, background: async () => undefined, foreground: async () => undefined, dispatch: async () => [] });
     runtime.stop(); release();
     await expect(done).resolves.toBeUndefined();
+  });
+
+  it('uses Windows-safe occurrence names for default heartbeat workers', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-worker-filename-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', now: () => '2026-08-27T10:00:00.000Z' });
+    await runtime.start({ maxTicks: 1, cadenceMs: 0 });
+    const files = await readdir(path.join(runtime.paths.sessions, 'background'));
+    expect(files.length).toBeGreaterThan(0); expect(files.every((file) => !/[<>:"/\\|?*]/u.test(file))).toBe(true);
+  });
+
+  it('drains sibling worker work and closes the boundary when one worker fails', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-worker-failure-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1' });
+    let drained = false; let closed = false; runtime.qq.close = async () => { closed = true; };
+    await expect(runtime.start({ cadenceMs: 0, foreground: async () => { throw new Error('worker failure'); }, background: async () => { await new Promise((resolve) => setTimeout(resolve, 25)); drained = true; }, dispatch: async () => [] })).rejects.toThrow('worker failure');
+    expect({ drained, closed }).toEqual({ drained: true, closed: true });
   });
 });

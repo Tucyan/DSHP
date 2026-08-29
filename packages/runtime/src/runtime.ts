@@ -17,10 +17,11 @@ const ConversationStateSchema = z.object({ next: z.record(z.string(), z.number()
 const DispatchStateSchema = z.object({ dispatched: z.record(z.object({ at: z.string(), status: z.enum(['pending', 'completed']), owner: z.string().optional(), leaseUntil: z.string().optional(), action: AgentActionSchema.optional() }).strict()) }).strict();
 const RuntimeTraceEvents = new Set(['action.accepted', 'action.rejected', 'qq.inbound', 'qq.outbound', 'memory.consolidate', 'memory.apply', 'heartbeat.foreground', 'heartbeat.background', 'schedule.dispatch', 'skill.created', 'plugin.proposed']);
 type DeliveryScope = { messageId?: string; stableKey?: string; effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> };
+type LeaseGuard = { check: () => void; stop: () => void };
 
 export interface GoalContextPort { getCurrentGoal(trigger: AgentTrigger): string | undefined | Promise<string | undefined>; }
 export interface RuntimeModel extends StructuredModelPort { compress?(events: readonly { content: string }[]): string | Promise<string>; propose?(input: { newHistory: readonly unknown[]; profile: string; index: string; relevantMemories: readonly string[] }): unknown[] | Promise<unknown[]>; }
-export interface RuntimeOptions extends BootstrapOptions { peerId: string; now?: () => string; model?: RuntimeModel; goalPort?: GoalContextPort; }
+export interface RuntimeOptions extends BootstrapOptions { peerId: string; now?: () => string; model?: RuntimeModel; goalPort?: GoalContextPort; leaseRenewalMs?: number; }
 export interface WorkerOptions { cadenceMs?: number; maxTicks?: number; keepAlive?: boolean; runImmediately?: boolean; wait?: (milliseconds: number) => Promise<void>; foreground?: () => Promise<unknown>; background?: () => Promise<unknown>; dispatch?: () => Promise<unknown>; }
 export interface LiveRuntimeOptions extends RuntimeOptions { model: RuntimeModel; goalPort: GoalContextPort; transport: QqTransport; inbound: AsyncIterable<QqInbound>; scheduleTool: DshLiveScheduleTool; }
 export interface RuntimeSchedulePort extends DshSchedulePort { recover?: (at: string) => Promise<ScheduleBinding[]>; reconcilePending?: (key: string, resolution: PendingScheduleResolution) => Promise<ScheduleBinding | null>; }
@@ -44,13 +45,14 @@ export class PersonalGrowthRuntime {
   private readonly mainConversationPath: string;
   private readonly scheduleDispatchState: string;
   private readonly sessionId: string;
+  private readonly leaseRenewalMs: number;
   private processQueue: Promise<unknown> = Promise.resolve();
   private readonly dispatchOwner = randomUUID();
   private readonly deliveryScopes = new AsyncLocalStorage<DeliveryScope>();
   private running = false;
 
   private constructor(boot: BootstrappedRuntime, options: RuntimeOptions, qq: RuntimeQq, schedules: RuntimeSchedulePort, model: RuntimeModel) {
-    this.paths = boot.paths; this.now = options.now ?? (() => new Date().toISOString()); this.model = model;
+    this.paths = boot.paths; this.now = options.now ?? (() => new Date().toISOString()); this.model = model; this.leaseRenewalMs = options.leaseRenewalMs ?? 10_000;
     this.sessionId = `qq:${options.peerId}`; this.conversationState = `${this.paths.storage}/conversation-state.json`; this.tracePath = `${this.paths.workspace}/data/traces.jsonl`; this.mainConversationPath = `${this.paths.sessions}/main/conversation.jsonl`; this.scheduleDispatchState = `${this.paths.storage}/schedule-dispatch.json`;
     this.qq = qq; this.schedules = schedules; this.extensions = new ExtensionWriter(this.paths.agentsHome, this.paths.root, this.tracePath);
     const compressor = { compress: (events: readonly ConversationEvent[]) => model.compress?.(events) ?? events.map((event) => event.content).join('；').slice(0, 2000) };
@@ -67,9 +69,9 @@ export class PersonalGrowthRuntime {
       userMessage: { deliver: (message, trigger) => this.deliver(message.text, trigger, false) },
       skillWriter: { write: (skill, trigger) => this.extensions.createSkill({ name: skill.name, description: 'Use when the user requests a repeatable workflow.', instructions: `${skill.instructions}\n\nInput: user request. Output: completed workflow. Stop when output is delivered.`, positiveTriggers: ['explicit skill request'], negativeTriggers: ['unrelated request'] }, trigger.at).then(() => undefined) },
       pluginWriter: { write: (proposal, trigger) => this.extensions.proposePlugin(proposal, trigger.at).then(() => undefined) },
-      reflection: { write: (reflection, trigger) => appendJsonl(`${this.paths.sessions}/background/${trigger.type}-${'occurrenceId' in trigger ? trigger.occurrenceId : 'reflection'}.jsonl`, { at: trigger.at, actionType: 'REFLECT', summary: reflection.summary }) },
+      reflection: { write: (reflection, trigger) => appendJsonl(`${this.paths.sessions}/background/${safeOccurrenceFileName(`${trigger.type}-${'occurrenceId' in trigger ? trigger.occurrenceId : 'reflection'}`)}.jsonl`, { at: trigger.at, actionType: 'REFLECT', summary: reflection.summary }) },
     });
-    this.heartbeat = new HeartbeatService({ workspace: this.paths.workspace, core: this.core, clock: this.now, config: { timeZone: 'UTC', quietHours: { start: '00:00', end: '00:00' }, cooldownMinutes: 120, maxContactsPerDay: 4 }, sink: { append: async (record) => appendJsonl(`${this.paths.sessions}/background/${record.occurrenceId}.jsonl`, redactTrace(record)) } });
+    this.heartbeat = new HeartbeatService({ workspace: this.paths.workspace, core: this.core, clock: this.now, config: { timeZone: 'UTC', quietHours: { start: '00:00', end: '00:00' }, cooldownMinutes: 120, maxContactsPerDay: 4 }, sink: { append: async (record) => appendJsonl(`${this.paths.sessions}/background/${safeOccurrenceFileName(record.occurrenceId)}.jsonl`, redactTrace(record)) } });
   }
 
   static async open(options: RuntimeOptions): Promise<PersonalGrowthRuntime> {
@@ -96,49 +98,58 @@ export class PersonalGrowthRuntime {
       const envelope = this.qq.receiveEnvelope ? await this.qq.receiveEnvelope() : await this.qq.receive().then((trigger) => trigger ? { trigger, messageId: `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}` } : null);
       if (!envelope) return null;
       if (this.qq.claimInbound && await this.qq.claimInbound(envelope.messageId) !== 'claimed') continue;
-      await this.traceEvent('qq.inbound', { messageId: envelope.messageId, status: 'claimed' });
-      const trigger = envelope.trigger; const userTrigger = trigger.type === 'user_message' ? trigger : undefined; const entry = userTrigger ? await this.reserveProcessing(envelope.messageId, userTrigger) : undefined;
-      const user = entry && userTrigger ? { sessionId: userTrigger.sessionId, seq: entry.userSeq, role: 'user' as const, content: userTrigger.text, at: userTrigger.at } satisfies ConversationEvent : undefined;
-      if (entry) {
-        await this.appendConversationOnce(user!);
-      }
-      let action: AgentAction;
-      let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
-      if (entry?.action) action = entry.action;
-      else {
-        const scope: DeliveryScope = { messageId: envelope.messageId, effects: [] };
-        const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
-        try { action = await this.deliveryScopes.run(scope, () => this.core.handle(trigger)); effects = scope.effects; }
-        finally { clearInterval(renewal); }
-        if (entry) await this.recordProcessingAction(envelope.messageId, action);
-      }
-      if (userTrigger) {
-        const assistant: ConversationEvent = { sessionId: userTrigger.sessionId, seq: entry!.assistantSeq, role: 'assistant', content: action.type === 'RESPOND' ? action.text : action.type, at: userTrigger.at };
-        await this.appendConversationOnce(assistant);
-        const history = await this.memory.consume([user!, assistant]);
-        if (history) { await this.traceEvent('memory.consolidate', { sessionId: userTrigger.sessionId, fromSeq: history.fromSeq, toSeq: history.toSeq }); const proposals = await this.dream.dream({ newHistory: [history], profile: await this.memory.readProfile(), index: await this.memory.readIndex(), relevantMemories: [] }); for (const proposal of proposals) { await this.applyDream(proposal); await this.traceEvent('memory.apply', { action: proposal.action, path: proposal.path }); } }
-        if (!effects.length && (action.type === 'RESPOND' || action.type === 'MESSAGE_USER')) effects = [{ text: action.text, trigger, stableKey: envelope.messageId }];
-        await this.flushDeliveries(effects);
-        await this.completeProcessing(envelope.messageId, action); if (this.qq.completeInbound) await this.qq.completeInbound(envelope.messageId);
-      } else {
-        await this.flushDeliveries(effects);
-      }
-      return { trigger, action };
+      const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
+      try {
+        await this.traceEvent('qq.inbound', { messageId: envelope.messageId, status: 'claimed' });
+        const trigger = envelope.trigger; const userTrigger = trigger.type === 'user_message' ? trigger : undefined; const entry = userTrigger ? await this.reserveProcessing(envelope.messageId, userTrigger) : undefined;
+        const user = entry && userTrigger ? { sessionId: userTrigger.sessionId, seq: entry.userSeq, role: 'user' as const, content: userTrigger.text, at: userTrigger.at } satisfies ConversationEvent : undefined;
+        if (entry) await this.appendConversationOnce(user!);
+        let action: AgentAction;
+        let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
+        if (entry?.action) action = entry.action;
+        else {
+          const scope: DeliveryScope = { messageId: envelope.messageId, effects: [] };
+          action = await this.deliveryScopes.run(scope, () => this.core.handle(trigger)); effects = scope.effects;
+          renewal.check();
+          if (entry) await this.recordProcessingAction(envelope.messageId, action);
+        }
+        if (userTrigger) {
+          const assistant: ConversationEvent = { sessionId: userTrigger.sessionId, seq: entry!.assistantSeq, role: 'assistant', content: action.type === 'RESPOND' ? action.text : action.type, at: userTrigger.at };
+          renewal.check(); await this.appendConversationOnce(assistant);
+          renewal.check(); const history = await this.memory.consume([user!, assistant]);
+          if (history) { await this.traceEvent('memory.consolidate', { sessionId: userTrigger.sessionId, fromSeq: history.fromSeq, toSeq: history.toSeq }); renewal.check(); const proposals = await this.dream.dream({ newHistory: [history], profile: await this.memory.readProfile(), index: await this.memory.readIndex(), relevantMemories: [] }); for (const proposal of proposals) { renewal.check(); await this.applyDream(proposal); await this.traceEvent('memory.apply', { action: proposal.action, path: proposal.path }); } }
+          if (!effects.length && (action.type === 'RESPOND' || action.type === 'MESSAGE_USER')) effects = [{ text: action.text, trigger, stableKey: envelope.messageId }];
+          renewal.check(); await this.flushDeliveries(effects);
+          renewal.check(); await this.completeProcessing(envelope.messageId, action); renewal.check(); if (this.qq.completeInbound) await this.qq.completeInbound(envelope.messageId);
+        } else {
+          renewal.check(); await this.flushDeliveries(effects); renewal.check();
+        }
+        return { trigger, action };
+      } finally { renewal.stop(); }
     }
   }
   async start(options: WorkerOptions = {}): Promise<void> {
     this.running = true;
+    let resolveStop!: () => void;
+    const stopSignal = new Promise<void>((resolve) => { resolveStop = resolve; });
+    this.stopSignal = stopSignal; this.resolveStop = resolveStop; this.stopPromise = undefined;
     const workerEnabled = options.maxTicks !== undefined || options.cadenceMs !== undefined || options.foreground || options.background || options.dispatch;
-    const inboundLoop = async () => { while (this.running) { const result = await this.processNext(); if (!result) break; } if (workerEnabled && options.keepAlive === false) this.running = false; };
+    const inboundLoop = async () => { try { while (this.running) { const result = await this.processNext(); if (!result) break; } if (workerEnabled && options.keepAlive === false) this.signalStop(); } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
     if (!workerEnabled) { await inboundLoop(); return; }
     const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-    const foreground = options.foreground ?? (() => this.runForeground(`worker-foreground-${this.now()}`, 'low'));
-    const background = options.background ?? (() => this.runBackground(`worker-background-${this.now()}`));
+    const waitOrStop = async (milliseconds: number) => { if (!this.running) return; await Promise.race([wait(milliseconds), stopSignal]); };
+    const foreground = options.foreground ?? (() => this.runForeground(safeOccurrenceFileName(`worker-foreground-${this.now()}`), 'low'));
+    const background = options.background ?? (() => this.runBackground(safeOccurrenceFileName(`worker-background-${this.now()}`)));
     const dispatch = options.dispatch ?? (() => this.dispatchDue());
-    const workerLoop = async () => { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await wait(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { await Promise.all([foreground(), background(), dispatch()]); ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await wait(options.cadenceMs ?? 1000); } };
-    await Promise.all([inboundLoop(), workerLoop()]); this.running = false;
+    const workerLoop = async () => { try { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { const tick = await Promise.allSettled([foreground(), background(), dispatch()]); const failure = tick.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason; ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); } } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
+    const settled = await Promise.allSettled([inboundLoop(), workerLoop()]); this.signalStop(); await this.stop();
+    const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason;
   }
-  stop(): void { this.running = false; void this.qq.close?.(); }
+  private stopSignal?: Promise<void>;
+  private resolveStop?: () => void;
+  private stopPromise?: Promise<void>;
+  private signalStop(): void { this.running = false; this.resolveStop?.(); }
+  async stop(): Promise<void> { this.signalStop(); this.stopPromise ??= Promise.resolve(this.qq.close?.()).then(() => undefined); await this.stopPromise; }
   async runBackground(occurrenceId: string): Promise<WakeResult> { const result = await this.heartbeat.wakeBackground({ occurrenceId, at: this.now() }); await this.traceEvent('heartbeat.background', { occurrenceId, status: result.status }); return result; }
   async runForeground(occurrenceId: string, importance: 'low' | 'normal' | 'high' = 'normal'): Promise<WakeResult> { const result = await this.heartbeat.wakeForeground({ occurrenceId, at: this.now(), importance }); await this.traceEvent('heartbeat.foreground', { occurrenceId, status: result.status }); return result; }
   async schedule(request: ScheduleRequest & { idempotencyKey?: string }): Promise<ScheduleBinding> { const { idempotencyKey, ...schedule } = request; return this.schedules.create(schedule, idempotencyKey); }
@@ -171,21 +182,22 @@ export class PersonalGrowthRuntime {
       const key = claimed.result.key;
       const trigger: AgentTrigger = { type: 'schedule', scheduleId: binding.id, prompt: binding.prompt, at };
       const current = claimed.state.dispatched[key]; let action: AgentAction; let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
-      if (current?.action) action = current.action;
-      else {
-        const scope: DeliveryScope = { stableKey: key, effects: [] };
-        const renewal = this.startLeaseRenewal(() => this.renewDispatchLease(key));
-        try {
+      const renewal = this.startLeaseRenewal(() => this.renewDispatchLease(key));
+      try {
+        if (current?.action) action = current.action;
+        else {
+          const scope: DeliveryScope = { stableKey: key, effects: [] };
           action = await this.deliveryScopes.run(scope, () => this.core.handle(trigger)); effects = scope.effects;
+          renewal.check();
           await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner) throw new Error('schedule dispatch ownership lost'); record.action = AgentActionSchema.parse(action); });
-        } catch (error) {
-          await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (record?.owner === this.dispatchOwner && record.status === 'pending') delete state.dispatched[key]; });
-          throw error;
-        } finally { clearInterval(renewal); }
-      }
-      if (!effects.length && (action.type === 'RESPOND' || action.type === 'MESSAGE_USER')) effects = [{ text: action.text, trigger, stableKey: key }];
-      await this.flushDeliveries(effects); results.push({ trigger, action }); await this.traceEvent('schedule.dispatch', { scheduleId: binding.id, status: 'completed' });
-      await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner) throw new Error('schedule dispatch ownership lost'); record.status = 'completed'; record.leaseUntil = undefined; });
+        }
+        if (!effects.length && (action.type === 'RESPOND' || action.type === 'MESSAGE_USER')) effects = [{ text: action.text, trigger, stableKey: key }];
+        renewal.check(); await this.flushDeliveries(effects); renewal.check(); results.push({ trigger, action }); await this.traceEvent('schedule.dispatch', { scheduleId: binding.id, status: 'completed' });
+        renewal.check(); await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner) throw new Error('schedule dispatch ownership lost'); record.status = 'completed'; record.leaseUntil = undefined; });
+      } catch (error) {
+        await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (record?.owner === this.dispatchOwner && record.status === 'pending' && !record.action) delete state.dispatched[key]; });
+        throw error;
+      } finally { renewal.stop(); }
     }
     return results;
   }
@@ -214,7 +226,11 @@ export class PersonalGrowthRuntime {
   private async deliver(text: string, trigger: AgentTrigger, background: boolean): Promise<void> { if (background) throw new Error('background delivery is prohibited'); const scope = this.deliveryScopes.getStore(); if (scope) { scope.effects.push({ text, trigger, stableKey: scope.messageId ?? scope.stableKey }); return; } await this.sendDelivery(text, trigger); }
   private async sendDelivery(text: string, trigger: AgentTrigger, stableKey?: string): Promise<void> { const stable = stableKey ?? ('occurrenceId' in trigger ? trigger.occurrenceId : undefined); const key = stable ? `message:${trigger.type}:${stable}` : `message:${trigger.type}:${trigger.at}:${createHash('sha256').update(text).digest('hex').slice(0, 12)}`; await this.qq.send({ occurrenceId: stable ?? key, idempotencyKey: key, text, background: false }); await this.traceEvent('qq.outbound', { idempotencyKey: key, status: 'sent' }); }
   private async flushDeliveries(effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }>): Promise<void> { for (const effect of effects) await this.sendDelivery(effect.text, effect.trigger, effect.stableKey); }
-  private startLeaseRenewal(renew: () => Promise<void> | undefined): ReturnType<typeof setInterval> { return setInterval(() => { void renew()?.catch(() => undefined); }, 10_000); }
+  private startLeaseRenewal(renew: () => Promise<void> | undefined): LeaseGuard {
+    let failure: unknown;
+    const timer = setInterval(() => { if (failure) return; void Promise.resolve(renew()).catch((error: unknown) => { failure ??= error; }); }, this.leaseRenewalMs);
+    return { check: () => { if (failure) throw failure instanceof Error ? failure : new Error('lease renewal failed'); }, stop: () => clearInterval(timer) };
+  }
   private async renewDispatchLease(key: string): Promise<void> { await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => { const record = state.dispatched[key]; if (!record || record.owner !== this.dispatchOwner || record.status !== 'pending') throw new Error('schedule dispatch lease is no longer owned'); record.leaseUntil = new Date(Date.parse(this.now()) + 30_000).toISOString(); }); }
   private async reserveProcessing(messageId: string, trigger: Extract<AgentTrigger, { type: 'user_message' }>): Promise<z.infer<typeof ProcessingEntrySchema>> { const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entries = state.entries ?? (state.entries = {}); const existing = entries[messageId]; if (existing) return existing; const next = state.next[trigger.sessionId] ?? 0; const entry = { messageId, sessionId: trigger.sessionId, text: trigger.text, at: trigger.at, userSeq: next + 1, assistantSeq: next + 2, status: 'pending' as const }; state.next[trigger.sessionId] = next + 2; entries[messageId] = entry; return entry; }); return transaction.result; }
   private async completeProcessing(messageId: string, action: AgentAction): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entry = state.entries?.[messageId]; if (!entry) throw new Error('conversation processing journal entry missing'); entry.action = AgentActionSchema.parse(action); entry.status = 'completed'; }); }
@@ -249,3 +265,4 @@ class LiveQqRuntimePort implements RuntimeQq {
   close(): Promise<void> { return this.official.close(); }
 }
 async function readText(filePath: string): Promise<string> { try { return await (await import('node:fs/promises')).readFile(filePath, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
+function safeOccurrenceFileName(value: string): string { const normalized = value.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/-+/gu, '-').replace(/^[.-]+|[.-]+$/gu, '').slice(0, 160) || 'occurrence'; const digest = createHash('sha256').update(value).digest('hex').slice(0, 12); return `${normalized}-${digest}`; }

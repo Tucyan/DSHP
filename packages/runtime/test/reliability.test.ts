@@ -49,4 +49,12 @@ describe('runtime processing durability', () => {
     expect(await runtime.qq.claimInbound?.('operator-retry')).toBe('claimed'); await runtime.reconcileQqInbound('operator-retry', 'retry');
     runtime.qq.pushInbound(event); expect(await runtime.processNext()).not.toBeNull();
   });
+  it('renews the inbound lease through memory consolidation and delivery', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-inbound-lease-')); const model = new DemoModel(); let renewed = 0;
+    model.compress = async (events) => { await new Promise((resolve) => setTimeout(resolve, 35)); return events.map((event) => event.content).join(';'); };
+    const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', model, leaseRenewalMs: 5 } as Parameters<typeof createRuntime>[0]);
+    runtime.qq.renewInbound = async () => { renewed += 1; };
+    runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'lease-message', text: 'hello', at: '2026-08-27T10:00:00.000Z' });
+    await runtime.processNext(); expect(renewed).toBeGreaterThan(0);
+  });
 });

@@ -71,4 +71,11 @@ describe('schedule dispatch', () => {
     const [a, b] = await Promise.all([first.dispatchDue('2026-08-27T10:00:00.000Z'), second.dispatchDue('2026-08-27T10:00:00.000Z')]);
     expect(a.length + b.length).toBe(1); expect(first.qq.outbox.length + second.qq.outbox.length).toBe(1);
   });
+  it('renews a schedule lease through slow delivery', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-schedule-lease-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1', leaseRenewalMs: 5 } as Parameters<typeof createRuntime>[0]);
+    await runtime.schedule({ idempotencyKey: 'lease', sessionId: 'qq:peer-1', prompt: 'lease', kind: 'once', at: '2026-08-27T09:00:00.000Z' });
+    let renewed = 0; Object.defineProperty(runtime, 'renewDispatchLease', { value: async () => { renewed += 1; } }); const original = runtime.qq.send.bind(runtime.qq);
+    runtime.qq.send = async (message) => { await new Promise((resolve) => setTimeout(resolve, 35)); return original(message); };
+    await runtime.dispatchDue('2026-08-27T10:00:00.000Z'); expect(renewed).toBeGreaterThan(0);
+  });
 });
