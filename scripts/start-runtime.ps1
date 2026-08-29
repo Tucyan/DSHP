@@ -24,15 +24,20 @@ if ($LiveQQ) {
   if ($LASTEXITCODE -ne 0) { throw 'managed QQ profile binding mismatch' }
 }
 if ($DryRun) {
-  $dryArgs = if ($LiveQQ) { @('web','--port', [string]$config.webPort) } else { @('web','--patch',$disabledPatch,'--port', [string]$config.webPort) }
-  [ordered]@{ command='corepack'; args=@('pnpm@11.7.0','--filter','@personal-growth/dsh-adapter','exec','dsh') + $dryArgs; cwd=$config.workspace; env=@{ DSH_HOME=$env:DSH_HOME; DSH_AGENTS_HOME=$env:DSH_AGENTS_HOME; DSH_WORKSPACE=$env:DSH_WORKSPACE; PGA_RUNTIME_ROOT=$env:PGA_RUNTIME_ROOT; PGA_PLUGINS_DIR=$env:PGA_PLUGINS_DIR; PGA_SKILLS_DIR=$env:PGA_SKILLS_DIR; PGA_SESSIONS_DIR=$env:PGA_SESSIONS_DIR; PGA_STORAGE_DIR=$env:PGA_STORAGE_DIR; PGA_CREDENTIALS_DIR=$env:PGA_CREDENTIALS_DIR }; webPort=$config.webPort } | ConvertTo-Json -Depth 4; exit 0
+  if ($LiveQQ) { $dryArgs = @('node', (Join-Path $repo 'packages/dsh-host/dist/cli.js'), '--live-qq'); $dryCwd = $repo; $dryCommand = 'node' } else { $dryArgs = @('--filter','@personal-growth/dsh-adapter','exec','dsh','web','--patch',$disabledPatch,'--port', [string]$config.webPort); $dryCwd = $config.workspace; $dryCommand = 'corepack' }
+  [ordered]@{ command=$dryCommand; args=if ($dryCommand -eq 'corepack') { @('pnpm@11.7.0') + $dryArgs } else { $dryArgs }; cwd=$dryCwd; env=@{ DSH_HOME=$env:DSH_HOME; DSH_AGENTS_HOME=$env:DSH_AGENTS_HOME; DSH_WORKSPACE=$env:DSH_WORKSPACE; PGA_RUNTIME_ROOT=$env:PGA_RUNTIME_ROOT; PGA_PLUGINS_DIR=$env:PGA_PLUGINS_DIR; PGA_SKILLS_DIR=$env:PGA_SKILLS_DIR; PGA_SESSIONS_DIR=$env:PGA_SESSIONS_DIR; PGA_STORAGE_DIR=$env:PGA_STORAGE_DIR; PGA_CREDENTIALS_DIR=$env:PGA_CREDENTIALS_DIR; QQBOT_ALLOWED_PEER_ID=$livePeer }; webPort=$config.webPort } | ConvertTo-Json -Depth 4; exit 0
 }
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'init-runtime.ps1')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Set-Location $config.workspace
 if ($LiveQQ) {
   if (-not $env:QQBOT_APPID -or -not $env:QQBOT_SECRET) { throw 'Live QQ requires QQBOT_APPID and QQBOT_SECRET in the process environment; no credential file is read.' }
-  & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh web --port $config.webPort
+  $env:QQBOT_APP_ID = $env:QQBOT_APPID
+  $env:QQBOT_APP_SECRET = $env:QQBOT_SECRET
+  $env:QQBOT_ALLOWED_PEER_ID = $livePeer
+  $hostCli = Join-Path $repo 'packages/dsh-host/dist/cli.js'
+  if (-not (Test-Path -LiteralPath $hostCli)) { throw 'personal-growth-dsh-host is not built; run the repository build before starting live QQ.' }
+  & node $hostCli --live-qq
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
   & corepack pnpm@11.7.0 --filter @personal-growth/dsh-adapter exec dsh web --patch $disabledPatch --port $config.webPort
