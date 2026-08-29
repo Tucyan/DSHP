@@ -69,4 +69,10 @@ describe('runtime processing durability', () => {
     runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'invalid-time', text: 'hello', at: 'not-a-date' });
     expect(await runtime.processNext()).toBeNull(); expect(await runtime.queryMainConversation()).toBe('');
   });
+  it('claims legacy receive messages before processing, so two runtimes process one delivery', async () => {
+    const root1 = await mkdtemp(path.join(tmpdir(), 'pga-legacy-one-')); const root2 = await mkdtemp(path.join(tmpdir(), 'pga-legacy-two-')); const event = { type: 'user_message' as const, sessionId: 'qq:peer-1', text: 'legacy message', at: '2026-08-27T10:00:00.000Z' }; let deliveries = 0; const claims = new Set<string>();
+    const runtimes = await Promise.all([root1, root2].map((root) => createRuntime({ repoRoot: root, peerId: 'peer-1' })));
+    for (const runtime of runtimes) { const qq = runtime.qq as typeof runtime.qq & { receiveEnvelope?: unknown }; qq.receiveEnvelope = undefined; qq.receive = async () => deliveries++ < 2 ? event : null; qq.claimInbound = async (messageId) => { if (claims.has(messageId)) return 'pending'; claims.add(messageId); return 'claimed'; }; qq.completeInbound = async () => undefined; }
+    const results = await Promise.all(runtimes.map((runtime) => runtime.processNext())); expect(results.filter(Boolean)).toHaveLength(1); expect(claims.size).toBe(1);
+  });
 });

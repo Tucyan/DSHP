@@ -16,11 +16,12 @@ const InboundEntrySchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('pending'), owner: z.string().min(1).max(256), leaseUntil: TimestampSchema, trigger: InboundTriggerSchema }).strict(),
   z.object({ status: z.literal('completed'), completedAt: TimestampSchema, trigger: InboundTriggerSchema }).strict(),
 ]);
-const StateSchema = z.object({ binding: BindingSchema.nullable(), outbound: z.record(LedgerEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'outbound ledger is too large'), inbound: z.record(InboundEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'inbound ledger is too large') }).strict();
+const StateSchema = z.object({ binding: BindingSchema.nullable(), outbound: z.record(MessageIdSchema, LedgerEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'outbound ledger is too large'), inbound: z.record(MessageIdSchema, InboundEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'inbound ledger is too large') }).strict();
 type State = z.infer<typeof StateSchema>;
 function checkedTimestamp(value: string): string { return TimestampSchema.parse(value); }
 function checkedMessageId(value: string): string { return MessageIdSchema.parse(value); }
 function hasControlCharacter(value: string): boolean { for (const character of value) { const code = character.charCodeAt(0); if (code < 32 || code === 127) return true; } return false; }
+function hasPayloadlessInbound(value: unknown): boolean { if (!value || typeof value !== 'object' || Array.isArray(value)) return false; return Object.values(value).some((record) => record && typeof record === 'object' && !Array.isArray(record) && !('trigger' in record)); }
 function pruneCompleted(state: State, limit: number): void {
   const inboundCompleted = Object.entries(state.inbound).flatMap(([messageId, record]) => record.status === 'completed' ? [[messageId, record] as const] : []).sort(([, a], [, b]) => Date.parse(a.completedAt) - Date.parse(b.completedAt));
   const inboundExcess = Math.max(0, Object.keys(state.inbound).length - limit);
@@ -46,7 +47,7 @@ export class QqDurableStateStore {
     catch (error) {
       // One-way migration for the pre-inbound-ledger state. Any other malformed
       // state remains fail-closed instead of guessing ownership.
-      try { const legacy = JSON.parse(await readFile(target, 'utf8')) as { binding?: unknown; outbound?: unknown; inbound?: unknown }; if (legacy && legacy.inbound === undefined && legacy.binding !== undefined && legacy.outbound !== undefined) state = StateSchema.parse({ binding: legacy.binding, outbound: legacy.outbound, inbound: {} }); else throw error; }
+      try { const legacy = JSON.parse(await readFile(target, 'utf8')) as { binding?: unknown; outbound?: unknown; inbound?: unknown }; if (hasPayloadlessInbound(legacy?.inbound)) throw new QqDurableStateError('INBOUND_MIGRATION', 'legacy inbound records have no payload; reconcile or quarantine them before reopening QQ state'); if (legacy && legacy.inbound === undefined && legacy.binding !== undefined && legacy.outbound !== undefined) state = StateSchema.parse({ binding: legacy.binding, outbound: legacy.outbound, inbound: {} }); else throw error; }
       catch (migrationError) { if (migrationError === error) throw error; throw migrationError; }
     }
     return new QqDurableStateStore(target, path.resolve(runtimeRoot), state, clock);
@@ -59,8 +60,9 @@ export class QqDurableStateStore {
   }
   async enqueueInbound(messageId: string, trigger: DurableInboundTrigger): Promise<'queued' | 'pending' | 'completed'> {
     checkedMessageId(messageId); const parsed = InboundTriggerSchema.parse(trigger);
-    return this.mutate((state) => { const prior = state.inbound[messageId]; if (prior) { if (JSON.stringify(prior.trigger) !== JSON.stringify(parsed)) throw new QqDurableStateError('INBOUND_STATE', 'inbound message payload conflicts with its durable record'); return prior.status; } state.inbound[messageId] = { status: 'queued', trigger: parsed }; return 'queued'; });
+    return this.mutate((state) => { const prior = state.inbound[messageId]; if (prior) { if (JSON.stringify(prior.trigger) !== JSON.stringify(parsed)) throw new QqDurableStateError('INBOUND_STATE', 'inbound message payload conflicts with its durable record'); return prior.status; } if (Object.keys(state.inbound).length >= 10_000 && !Object.values(state.inbound).some((record) => record.status === 'completed')) throw new QqDurableStateError('INBOUND_CAPACITY', 'inbound ledger is full; retry after completed records are reconciled'); state.inbound[messageId] = { status: 'queued', trigger: parsed }; return 'queued'; });
   }
+  async inboundCapacityAvailable(): Promise<boolean> { return this.mutate((state) => Object.keys(state.inbound).length < 10_000 || Object.values(state.inbound).some((record) => record.status === 'completed')); }
   async claimNextInbound(): Promise<DurableInboundEnvelope | null> {
     return this.mutate((state) => { const now = Date.parse(checkedTimestamp(this.clock()));
       for (const [messageId, record] of Object.entries(state.inbound)) {
@@ -78,11 +80,11 @@ export class QqDurableStateStore {
   async renewInbound(messageId: string): Promise<void> { checkedMessageId(messageId); await this.mutate((state) => { const prior = state.inbound[messageId]; if (!prior || prior.status !== 'pending' || prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound lease is not owned by this runtime'); const now = Date.parse(checkedTimestamp(this.clock())); prior.leaseUntil = new Date(now + 30_000).toISOString(); }); }
   async completeInbound(messageId: string): Promise<void> { checkedMessageId(messageId); await this.mutate((state) => { const prior = state.inbound[messageId]; if (!prior || prior.status !== 'pending' || prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound completion is not owned by this runtime'); state.inbound[messageId] = { status: 'completed', completedAt: checkedTimestamp(this.clock()), trigger: prior.trigger }; }); }
   async failInbound(messageId: string): Promise<void> { checkedMessageId(messageId); await this.mutate((state) => { const prior = state.inbound[messageId]; if (!prior || prior.status === 'completed' || prior.status === 'queued') return; if (prior.owner !== this.owner) throw new QqDurableStateError('INBOUND_STATE', 'inbound failure is not owned by this runtime'); state.inbound[messageId] = { status: 'queued', trigger: prior.trigger }; }); }
-  async complete(key: string): Promise<void> { await this.mutate((state) => { const prior = state.outbound[key]; if (!prior || prior.status !== 'pending') throw new QqDurableStateError('OUTBOUND_STATE', 'outbound completion has no pending reservation'); prior.status = 'sent'; }); }
-  async fail(key: string): Promise<void> { await this.mutate((state) => { if (state.outbound[key]?.status === 'pending') delete state.outbound[key]; }); }
-  async reconcile(key: string, outcome: 'sent' | 'not_sent'): Promise<void> { if (outcome === 'sent') return this.complete(key); await this.fail(key); }
-  async simulatePending(key: string, occurrenceId: string): Promise<void> { await this.mutate((state) => { state.outbound[key] = { status: 'pending', occurrenceId }; }); }
+  async complete(key: string): Promise<void> { checkedMessageId(key); await this.mutate((state) => { const prior = state.outbound[key]; if (!prior || prior.status !== 'pending') throw new QqDurableStateError('OUTBOUND_STATE', 'outbound completion has no pending reservation'); prior.status = 'sent'; }); }
+  async fail(key: string): Promise<void> { checkedMessageId(key); await this.mutate((state) => { if (state.outbound[key]?.status === 'pending') delete state.outbound[key]; }); }
+  async reconcile(key: string, outcome: 'sent' | 'not_sent'): Promise<void> { checkedMessageId(key); if (outcome === 'sent') return this.complete(key); await this.fail(key); }
+  async simulatePending(key: string, occurrenceId: string): Promise<void> { checkedMessageId(key); checkedMessageId(occurrenceId); await this.mutate((state) => { state.outbound[key] = { status: 'pending', occurrenceId }; }); }
   private mutate<T>(fn: (state: State) => T): Promise<T> { const result = this.queue.then(async () => { const transaction = await durableJsonTransaction(this.statePath, this.runtimeRoot, StateSchema, { binding: null, outbound: {}, inbound: {} }, async (state) => { const value = await fn(state); pruneCompleted(state, 10_000); return value; }); this.state = transaction.state; return transaction.result; }); this.queue = result.then(() => undefined, () => undefined); return result; }
 }
 
-export class QqDurableStateError extends Error { constructor(readonly code: 'OUTBOUND_UNCERTAIN' | 'OUTBOUND_STATE' | 'INBOUND_STATE', message: string) { super(message); this.name = 'QqDurableStateError'; } }
+export class QqDurableStateError extends Error { constructor(readonly code: 'OUTBOUND_UNCERTAIN' | 'OUTBOUND_STATE' | 'INBOUND_STATE' | 'INBOUND_CAPACITY' | 'INBOUND_MIGRATION', message: string) { super(message); this.name = 'QqDurableStateError'; } }

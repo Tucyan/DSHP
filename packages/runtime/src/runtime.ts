@@ -103,7 +103,13 @@ export class PersonalGrowthRuntime {
   processNext(): Promise<ProcessResult | null> { const previous = this.processQueue; const operation = this.trackOperation(() => previous.then(() => this.processNextNow())); this.processQueue = operation.then(() => undefined, () => undefined); return operation; }
   private async processNextNow(): Promise<ProcessResult | null> {
     while (true) {
-      const envelope = this.qq.receiveEnvelope ? await this.qq.receiveEnvelope() : await this.qq.receive().then((trigger) => trigger ? { trigger, messageId: `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}` } : null);
+      const legacyReceive = !this.qq.receiveEnvelope;
+      const envelope = legacyReceive ? await this.qq.receive().then(async (trigger) => {
+        if (!trigger) return null;
+        const messageId = `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}`;
+        if (this.qq.claimInbound && await this.qq.claimInbound(messageId) !== 'claimed') return null;
+        return { trigger, messageId };
+      }) : await this.qq.receiveEnvelope!();
       if (!envelope) return null;
       const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
       try {
