@@ -55,6 +55,9 @@ export interface BridgeState {
   claimInbound?(messageId: string): Promise<'claimed' | 'completed' | 'pending'>
   completeInbound?(messageId: string): Promise<void>
   failInbound?(messageId: string): Promise<void>
+  claimHistory?(historyId: string): Promise<boolean>
+  completeHistory?(historyId: string): Promise<void>
+  failHistory?(historyId: string): Promise<void>
   nextSequence(sessionId: string): Promise<number>
   acceptOutbound(key: string): Promise<boolean>
   failOutbound?(key: string): Promise<void>
@@ -76,6 +79,8 @@ export interface BridgeSessionEvent {
   messageId?: string
   /** Production adapters set this only after a completed turn boundary. */
   completed?: boolean
+  /** Stable durable key for proactive messages whose source turn is hidden. */
+  stableKey?: string
 }
 
 export interface ConversationEvent {
@@ -98,6 +103,8 @@ export interface PersonalGrowthBridgeOptions {
   cadence?: { foregroundMs?: number; backgroundMs?: number }
   /** Reports a late bot-start failure to the owning host lifecycle. */
   onStartError?: (error: unknown) => void
+  /** Production DSH session observers own the single consume/Dream pipeline. */
+  processMemory?: boolean
 }
 
 export function sessionIdForPeer(peerId: string): string {
@@ -186,7 +193,7 @@ export class PersonalGrowthBridge {
   observeAgentEvent(event: BridgeSessionEvent): void {
     if (event.type === 'assistant/message' && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
       this.observed.set(event.sessionId, event.text)
-      const key = `${event.sessionId}:${event.seq ?? event.text}`
+      const key = event.stableKey ?? `${event.sessionId}:${event.seq ?? event.text}`
       void (this.options.state?.acceptOutbound(key) ?? Promise.resolve(true)).then(accepted => {
         if (accepted) void this.options.bot.sendText({ peerId: this.options.allowedPeerId, messageId: event.messageId ?? this.activeMessageIds.get(event.sessionId) }, event.text).catch(() => this.options.state?.failOutbound?.(key))
       })
@@ -243,6 +250,10 @@ export class PersonalGrowthBridge {
         try { await this.options.bot.sendText({ peerId: message.peerId, messageId: message.messageId }, assistantText) }
         catch (error) { await this.options.state?.failOutbound?.(key); throw error }
       }
+    }
+    if (this.options.processMemory === false) {
+      await this.options.state?.completeInbound?.(message.messageId)
+      return
     }
     const at = message.at ?? this.options.now?.() ?? new Date().toISOString()
     const events: ConversationEvent[] = [

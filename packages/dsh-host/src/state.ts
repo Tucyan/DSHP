@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto'
 import type { BridgeState } from './bridge.js'
 
 interface InboundRecord { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string }
-interface StateFile { inbound: Record<string, InboundRecord>; outbound: string[]; sequences: Record<string, number> }
+interface HistoryRecordState { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string }
+interface StateFile { inbound: Record<string, InboundRecord>; outbound: string[]; sequences: Record<string, number>; histories: Record<string, HistoryRecordState> }
 
 /** Crash-safe, cross-process ledger for the single-user bridge. */
 export class FileBridgeState implements BridgeState {
@@ -44,7 +45,30 @@ export class FileBridgeState implements BridgeState {
   }
 
   failInbound(messageId: string): Promise<void> {
-    return this.update(state => { const record = state.inbound[messageId]; if (record?.owner === this.owner || record?.status === 'pending') delete state.inbound[messageId] })
+    return this.update(state => { const record = state.inbound[messageId]; if (record?.owner === this.owner) delete state.inbound[messageId] })
+  }
+
+  claimHistory(historyId: string): Promise<boolean> {
+    return this.update(state => {
+      const record = state.histories[historyId]
+      if (record?.status === 'completed') return false
+      const now = Date.now()
+      if (record?.status === 'pending' && record.leaseUntil && Date.parse(record.leaseUntil) > now && record.owner !== this.owner) return false
+      state.histories[historyId] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString() }
+      return true
+    })
+  }
+
+  completeHistory(historyId: string): Promise<void> {
+    return this.update(state => {
+      const record = state.histories[historyId]
+      if (record?.owner !== this.owner && record?.status === 'pending') throw new Error('history ownership lost')
+      state.histories[historyId] = { status: 'completed' }
+    })
+  }
+
+  failHistory(historyId: string): Promise<void> {
+    return this.update(state => { if (state.histories[historyId]?.owner === this.owner) delete state.histories[historyId] })
   }
 
   nextSequence(sessionId: string): Promise<number> {
@@ -95,7 +119,11 @@ export class FileBridgeState implements BridgeState {
       }
       const outbound = Array.isArray(parsed.outbound) ? parsed.outbound.filter((value): value is string => typeof value === 'string' && value.length > 0) : []
       const sequences = parsed.sequences && typeof parsed.sequences === 'object' ? Object.fromEntries(Object.entries(parsed.sequences).filter(([, value]) => Number.isInteger(value) && (value as number) >= 0)) as Record<string, number> : {}
-      return { inbound, outbound, sequences }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { inbound: {}, outbound: [], sequences: {} }; throw error }
+      const histories: Record<string, HistoryRecordState> = {}
+      if (parsed.histories && typeof parsed.histories === 'object') {
+        for (const [id, value] of Object.entries(parsed.histories as Record<string, unknown>)) if (value && typeof value === 'object' && ((value as HistoryRecordState).status === 'pending' || (value as HistoryRecordState).status === 'completed')) histories[id] = value as HistoryRecordState
+      }
+      return { inbound, outbound, sequences, histories }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { inbound: {}, outbound: [], sequences: {}, histories: {} }; throw error }
   }
 }

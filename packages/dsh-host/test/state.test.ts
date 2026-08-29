@@ -19,4 +19,17 @@ describe('FileBridgeState', () => {
       expect(JSON.parse(await readFile(file, 'utf8')).sequences.session).toBe(2)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
+
+  it('claims each history record once across restarts and preserves non-owner safety', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-history-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const first = new FileBridgeState(file)
+      const second = new FileBridgeState(file)
+      expect(await first.claimHistory('h1')).toBe(true)
+      expect(await second.claimHistory('h1')).toBe(false)
+      await first.completeHistory('h1')
+      expect(await second.claimHistory('h1')).toBe(false)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
 })

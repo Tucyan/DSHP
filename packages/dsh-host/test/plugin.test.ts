@@ -38,6 +38,6 @@ describe('production DSH host adapter', () => {
   it('restricts the hidden maintenance agent at unpublished setup time', () => {
     const calls: unknown[] = []
     createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
-    expect(calls).toEqual([{ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose'] }])
+    expect(calls).toEqual([{ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] }])
   })
 })

@@ -14,6 +14,6 @@ describe('production host critical contracts', () => {
     const names: string[] = []
     const registrar: DshToolRegistrar = { register(tool) { names.push(tool.name); return () => undefined } }
     registerPersonalGrowthTools(registrar, { agentsHome: 'C:/isolated/agents-home', proposals: 'C:/isolated/proposals' })
-    expect(names).toEqual(['personal_skill_create', 'personal_plugin_propose'])
+    expect(names).toEqual(['personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'])
   })
 })
