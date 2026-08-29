@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { appendJsonl, durableJsonTransaction, redactTrace, readJsonl, TraceRecordSchema, AgentActionSchema } from '@personal-growth/shared';
+import { appendJsonl, durableJsonTransaction, redactTrace, readJsonl, TraceRecordSchema, AgentActionSchema, AgentTriggerSchema } from '@personal-growth/shared';
 import { AgentCore, type StructuredModelPort } from '@personal-growth/agent-core';
 import type { AgentAction, AgentTrigger } from '@personal-growth/shared';
 import { MemoryService, DreamService, ConversationEventSchema, type ConversationEvent } from '@personal-growth/personal-memory';
@@ -12,9 +12,14 @@ import { bootstrapRuntime, type BootstrappedRuntime, type BootstrapOptions } fro
 import { DemoModel } from './demo-model.js';
 import { ExtensionWriter } from './extension-writer.js';
 
-const ProcessingEntrySchema = z.object({ messageId: z.string().min(1), sessionId: z.string().min(1), text: z.string().min(1), at: z.string().min(1), userSeq: z.number().int().positive(), assistantSeq: z.number().int().positive(), status: z.enum(['pending', 'completed']), action: AgentActionSchema.optional() }).strict();
-const ConversationStateSchema = z.object({ next: z.record(z.string(), z.number().int().nonnegative()), entries: z.record(ProcessingEntrySchema).default({}) }).strict();
-const DispatchStateSchema = z.object({ dispatched: z.record(z.object({ at: z.string(), status: z.enum(['pending', 'completed']), owner: z.string().optional(), leaseUntil: z.string().optional(), action: AgentActionSchema.optional() }).strict()) }).strict();
+const RuntimeTimestampSchema = z.string().datetime({ offset: true }).refine((value) => { const epoch = Date.parse(value); return Number.isFinite(epoch) && epoch >= Date.UTC(2000, 0, 1) && epoch <= Date.UTC(2100, 0, 1); }, 'timestamp is outside supported range');
+const RuntimeConversationEventSchema = ConversationEventSchema.extend({ at: RuntimeTimestampSchema });
+const ProcessingEntrySchema = z.object({ messageId: z.string().min(1).max(256), sessionId: z.string().min(1).max(256), text: z.string().min(1).max(4096), at: RuntimeTimestampSchema, userSeq: z.number().int().positive().max(1_000_000), assistantSeq: z.number().int().positive().max(1_000_000), status: z.enum(['pending', 'completed']), action: AgentActionSchema.optional() }).strict();
+const ConversationStateSchema = z.object({
+  next: z.record(z.string().min(1).max(256), z.number().int().nonnegative().max(1_000_000)).refine((value) => Object.keys(value).length <= 1_000, 'conversation session state is too large'),
+  entries: z.record(ProcessingEntrySchema).refine((value) => Object.keys(value).length <= 10_000, 'conversation journal is too large').default({}),
+}).strict();
+const DispatchStateSchema = z.object({ dispatched: z.record(z.object({ at: RuntimeTimestampSchema, status: z.enum(['pending', 'completed']), owner: z.string().min(1).max(256).optional(), leaseUntil: RuntimeTimestampSchema.optional(), action: AgentActionSchema.optional() }).strict()).refine((value) => Object.keys(value).length <= 10_000, 'dispatch ledger is too large') }).strict();
 const RuntimeTraceEvents = new Set(['action.accepted', 'action.rejected', 'qq.inbound', 'qq.outbound', 'memory.consolidate', 'memory.apply', 'heartbeat.foreground', 'heartbeat.background', 'schedule.dispatch', 'skill.created', 'plugin.proposed']);
 type DeliveryScope = { messageId?: string; stableKey?: string; effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> };
 type LeaseGuard = { check: () => void; stop: () => void };
@@ -100,11 +105,10 @@ export class PersonalGrowthRuntime {
     while (true) {
       const envelope = this.qq.receiveEnvelope ? await this.qq.receiveEnvelope() : await this.qq.receive().then((trigger) => trigger ? { trigger, messageId: `legacy:${createHash('sha256').update(JSON.stringify(trigger)).digest('hex')}` } : null);
       if (!envelope) return null;
-      if (this.qq.claimInbound && await this.qq.claimInbound(envelope.messageId) !== 'claimed') continue;
       const renewal = this.startLeaseRenewal(() => this.qq.renewInbound?.(envelope.messageId));
       try {
         await this.traceEvent('qq.inbound', { messageId: envelope.messageId, status: 'claimed' });
-        const trigger = envelope.trigger; const userTrigger = trigger.type === 'user_message' ? trigger : undefined; const entry = userTrigger ? await this.reserveProcessing(envelope.messageId, userTrigger) : undefined;
+        const trigger = validateRuntimeTrigger(envelope.trigger); const userTrigger = trigger.type === 'user_message' ? trigger : undefined; const entry = userTrigger ? await this.reserveProcessing(envelope.messageId, userTrigger) : undefined;
         const user = entry && userTrigger ? { sessionId: userTrigger.sessionId, seq: entry.userSeq, role: 'user' as const, content: userTrigger.text, at: userTrigger.at } satisfies ConversationEvent : undefined;
         let action: AgentAction;
         let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
@@ -134,26 +138,27 @@ export class PersonalGrowthRuntime {
     this.running = true;
     let resolveStop!: () => void;
     const stopSignal = new Promise<void>((resolve) => { resolveStop = resolve; });
-    this.stopSignal = stopSignal; this.resolveStop = resolveStop; this.stopPromise = undefined;
+    this.stopSignal = stopSignal; this.resolveStop = resolveStop; this.stopPromise = undefined; this.qqClosePromise = undefined;
     const workerEnabled = options.maxTicks !== undefined || options.cadenceMs !== undefined || options.foreground || options.background || options.dispatch;
-    const inboundLoop = async () => { try { while (this.running) { const result = await this.processNext(); if (!result) break; } if (workerEnabled && options.keepAlive === false) this.signalStop(); } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
+    const inboundLoop = async () => { try { while (this.running) { const result = await this.processNext(); if (!result) break; } if (workerEnabled && options.keepAlive === false) this.signalStop(); } catch (error) { this.signalStop(); void this.closeQq(); throw error; } };
     if (!workerEnabled) { await inboundLoop(); return; }
     const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
     const waitOrStop = async (milliseconds: number) => { if (!this.running) return; await Promise.race([wait(milliseconds), stopSignal]); };
     const foreground = options.foreground ?? (() => this.runForeground(safeOccurrenceFileName(`worker-foreground-${this.now()}`), 'low'));
     const background = options.background ?? (() => this.runBackground(safeOccurrenceFileName(`worker-background-${this.now()}`)));
     const dispatch = options.dispatch ?? (() => this.dispatchDue());
-    const workerLoop = async () => { try { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { const tick = await Promise.allSettled([this.trackOperation(foreground), this.trackOperation(background), this.trackOperation(dispatch)]); const failure = tick.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason; ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); } } catch (error) { this.signalStop(); void this.qq.close?.(); throw error; } };
+    const workerLoop = async () => { try { let ticks = 0; if (options.runImmediately === false && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); while (this.running && (options.maxTicks === undefined || ticks < options.maxTicks)) { const tick = await Promise.allSettled([this.trackOperation(foreground), this.trackOperation(background), this.trackOperation(dispatch)]); const failure = tick.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason; ticks += 1; if (this.running && (options.maxTicks === undefined || ticks < options.maxTicks) && (options.cadenceMs ?? 1000) > 0) await waitOrStop(options.cadenceMs ?? 1000); } } catch (error) { this.signalStop(); void this.closeQq(); throw error; } };
     const settled = await Promise.allSettled([inboundLoop(), workerLoop()]); this.signalStop(); await this.stop();
     const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected'); if (failure) throw failure.reason;
   }
   private stopSignal?: Promise<void>;
   private resolveStop?: () => void;
   private stopPromise?: Promise<void>;
+  private qqClosePromise?: Promise<void>;
   private signalStop(): void { this.running = false; this.resolveStop?.(); }
   private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const token = Symbol('runtime-operation'); let tracked!: Promise<T>;
-    tracked = Promise.resolve().then(() => this.operationScopes.run(token, operation)).finally(() => { if (this.activeOperations.get(token) === tracked) this.activeOperations.delete(token); });
+    const token = Symbol('runtime-operation');
+    const tracked = Promise.resolve().then(() => this.operationScopes.run(token, operation)).finally(() => { if (this.activeOperations.get(token) === tracked) this.activeOperations.delete(token); });
     this.activeOperations.set(token, tracked); return tracked;
   }
   private async drainOperations(): Promise<void> {
@@ -167,12 +172,13 @@ export class PersonalGrowthRuntime {
   async stop(): Promise<void> {
     this.signalStop();
     this.stopPromise ??= (async () => {
-      const closing = Promise.resolve(this.qq.close?.());
+      const closing = this.closeQq();
       await this.drainOperations();
       await closing;
     })();
     await this.stopPromise;
   }
+  private closeQq(): Promise<void> { this.qqClosePromise ??= Promise.resolve().then(() => this.qq.close?.()).then(() => undefined, () => undefined); return this.qqClosePromise; }
   async runBackground(occurrenceId: string): Promise<WakeResult> { const result = await this.heartbeat.wakeBackground({ occurrenceId, at: this.now() }); await this.traceEvent('heartbeat.background', { occurrenceId, status: result.status }); return result; }
   async runForeground(occurrenceId: string, importance: 'low' | 'normal' | 'high' = 'normal'): Promise<WakeResult> { const result = await this.heartbeat.wakeForeground({ occurrenceId, at: this.now(), importance }); await this.traceEvent('heartbeat.foreground', { occurrenceId, status: result.status }); return result; }
   async schedule(request: ScheduleRequest & { idempotencyKey?: string }): Promise<ScheduleBinding> { const { idempotencyKey, ...schedule } = request; return this.schedules.create(schedule, idempotencyKey); }
@@ -183,14 +189,15 @@ export class PersonalGrowthRuntime {
   async reconcileQqPending(idempotencyKey: string, outcome: 'sent' | 'not_sent'): Promise<void> { const reconcile = (this.qq as RuntimeQq & { reconcilePending?: (key: string, outcome: 'sent' | 'not_sent') => Promise<void> }).reconcilePending; if (!reconcile) throw new Error('QQ adapter does not expose pending reconciliation'); await reconcile.call(this.qq, idempotencyKey, outcome); }
   async reconcileQqInbound(messageId: string, outcome: 'retry' | 'completed'): Promise<void> { if (outcome === 'completed') { if (!this.qq.completeInbound) throw new Error('QQ adapter does not expose inbound reconciliation'); await this.qq.completeInbound(messageId); return; } if (!this.qq.failInbound) throw new Error('QQ adapter does not expose inbound reconciliation'); await this.qq.failInbound(messageId); }
   async dispatchDue(at = this.now()): Promise<ProcessResult[]> {
-    if (this.schedules.recover) await this.schedules.recover(at);
-    const bindings = await this.schedules.list(this.sessionId); const results: ProcessResult[] = []; const nowEpoch = Date.parse(at);
+    const parsedAt = RuntimeTimestampSchema.parse(at); if (this.schedules.recover) await this.schedules.recover(parsedAt);
+    const bindings = await this.schedules.list(this.sessionId); const results: ProcessResult[] = []; const nowEpoch = Date.parse(parsedAt);
     for (const binding of bindings) {
+      RuntimeTimestampSchema.parse(binding.at);
       if (binding.status === 'pending') continue;
       const firstDue = Date.parse(binding.at) <= nowEpoch;
       if (!firstDue) continue;
       const claimed = await durableJsonTransaction(this.scheduleDispatchState, this.paths.root, DispatchStateSchema, { dispatched: {} }, (state) => {
-        const nowEpoch = Date.parse(at);
+        const nowEpoch = Date.parse(parsedAt);
         const prefix = `schedule:${binding.id}:`;
         const previous = Object.entries(state.dispatched).filter(([candidate]) => candidate.startsWith(prefix)).sort((a, b) => Date.parse(b[1].at) - Date.parse(a[1].at))[0]?.[1];
         const occurrenceEpoch = binding.kind === 'interval' && previous ? Date.parse(previous.at) + (binding.everySeconds ?? 300) * 1000 : Date.parse(binding.at);
@@ -203,7 +210,7 @@ export class PersonalGrowthRuntime {
       });
       if (!claimed.result.claimed) continue;
       const key = claimed.result.key;
-      const trigger: AgentTrigger = { type: 'schedule', scheduleId: binding.id, prompt: binding.prompt, at };
+      const trigger: AgentTrigger = { type: 'schedule', scheduleId: binding.id, prompt: binding.prompt, at: parsedAt };
       const current = claimed.state.dispatched[key]; let action: AgentAction; let effects: Array<{ text: string; trigger: AgentTrigger; stableKey?: string }> = [];
       const renewal = this.startLeaseRenewal(() => this.renewDispatchLease(key));
       try {
@@ -241,7 +248,7 @@ export class PersonalGrowthRuntime {
   private async sessionDelta(trigger: AgentTrigger): Promise<string | undefined> {
     const sessionId = trigger.type === 'user_message' ? trigger.sessionId : this.sessionId;
     const transaction = await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, async () => {
-      const records = await readJsonl(this.mainConversationPath, ConversationEventSchema);
+      const records = await readJsonl(this.mainConversationPath, RuntimeConversationEventSchema);
       if (records.errors.length) throw new Error('main conversation is malformed');
       const recent = records.records.filter((record) => record.sessionId === sessionId).slice(-6);
       return recent.length ? recent.map((record) => `${record.role}: ${record.content.slice(0, 500)}`).join('\n') : undefined;
@@ -270,7 +277,7 @@ export class PersonalGrowthRuntime {
   private async completeProcessing(messageId: string, action: AgentAction): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entry = state.entries?.[messageId]; if (!entry) throw new Error('conversation processing journal entry missing'); entry.action = AgentActionSchema.parse(action); entry.status = 'completed'; }); }
   private async recordProcessingAction(messageId: string, action: AgentAction): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, (state) => { const entry = state.entries?.[messageId]; if (!entry) throw new Error('conversation processing journal entry missing'); entry.action = AgentActionSchema.parse(action); }); }
   private async appendConversationOnce(event: ConversationEvent): Promise<void> { await durableJsonTransaction(this.conversationState, this.paths.root, ConversationStateSchema, { next: {}, entries: {} }, () => this.appendConversationOnceUnlocked(event)); }
-  private async appendConversationOnceUnlocked(event: ConversationEvent): Promise<void> { const existing = await readJsonl(this.mainConversationPath, ConversationEventSchema); if (existing.errors.length) throw new Error('main conversation is malformed'); const found = existing.records.find((candidate) => candidate.sessionId === event.sessionId && candidate.seq === event.seq); if (found) { if (found.role !== event.role || found.content !== event.content) throw new Error('conversation journal conflict'); return; } await appendJsonl(this.mainConversationPath, event); }
+  private async appendConversationOnceUnlocked(event: ConversationEvent): Promise<void> { const parsedEvent = RuntimeConversationEventSchema.parse(event); const existing = await readJsonl(this.mainConversationPath, RuntimeConversationEventSchema); if (existing.errors.length) throw new Error('main conversation is malformed'); const found = existing.records.find((candidate) => candidate.sessionId === parsedEvent.sessionId && candidate.seq === parsedEvent.seq); if (found) { if (found.role !== parsedEvent.role || found.content !== parsedEvent.content) throw new Error('conversation journal conflict'); return; } await appendJsonl(this.mainConversationPath, parsedEvent); }
   private async traceEvent(event: string, data: Record<string, unknown>): Promise<void> { await this.writeTrace({ at: this.now(), event, data }); }
   private async writeTrace(record: unknown): Promise<void> { if (!record || typeof record !== 'object') throw new Error('trace record must be an object'); const value = record as { at?: unknown; event?: unknown; data?: unknown }; if (typeof value.at !== 'string' || typeof value.event !== 'string' || !RuntimeTraceEvents.has(value.event) || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw new Error('trace record is outside runtime allowlist'); const data = value.data as Record<string, unknown>; if (Object.keys(data).some((key) => /content|text|secret|token|password|credential|authorization/i.test(key))) throw new Error('trace data contains forbidden fields'); await appendJsonl(this.tracePath, redactTrace({ at: value.at, event: value.event, data })); }
   private async applyDream(proposal: Parameters<MemoryService['apply']>[0]): Promise<void> {
@@ -300,4 +307,11 @@ class LiveQqRuntimePort implements RuntimeQq {
   close(): Promise<void> { return this.official.close(); }
 }
 async function readText(filePath: string): Promise<string> { try { return await (await import('node:fs/promises')).readFile(filePath, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; } }
+function validateRuntimeTrigger(input: unknown): AgentTrigger {
+  const trigger = AgentTriggerSchema.parse(input); RuntimeTimestampSchema.parse(trigger.at);
+  if (trigger.type === 'user_message') { z.string().max(256).parse(trigger.sessionId); z.string().max(4096).parse(trigger.text); }
+  if (trigger.type === 'schedule') { z.string().max(256).parse(trigger.scheduleId); z.string().max(4096).parse(trigger.prompt); }
+  if (trigger.type === 'foreground_heartbeat' || trigger.type === 'background_heartbeat') z.string().max(256).parse(trigger.occurrenceId);
+  return trigger;
+}
 function safeOccurrenceFileName(value: string): string { const normalized = value.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/-+/gu, '-').replace(/^[.-]+|[.-]+$/gu, '').slice(0, 160) || 'occurrence'; const digest = createHash('sha256').update(value).digest('hex').slice(0, 12); return `${normalized}-${digest}`; }

@@ -46,4 +46,11 @@ describe('runtime worker', () => {
     let stopped = false; const stopping = runtime.stop().then(() => { stopped = true; }); await new Promise((resolve) => setTimeout(resolve, 10));
     expect(stopped).toBe(false); release(); await stopping; await expect(running).resolves.toBeUndefined(); expect(runtime.qq.outbox).toHaveLength(1);
   });
+
+  it('handles a rejecting close exactly once without rejecting worker completion', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-worker-close-error-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1' }); let closeCalls = 0;
+    runtime.qq.close = async () => { closeCalls += 1; throw new Error('close boundary failed'); };
+    await expect(runtime.start({ maxTicks: 1, cadenceMs: 0, foreground: async () => undefined, background: async () => undefined, dispatch: async () => [] })).resolves.toBeUndefined();
+    expect(closeCalls).toBe(1);
+  });
 });

@@ -64,4 +64,9 @@ describe('runtime processing durability', () => {
       await expect(createRuntime({ repoRoot: root, peerId: 'peer-1', leaseRenewalMs })).rejects.toThrow('leaseRenewalMs');
     }
   });
+  it('rejects invalid inbound timestamps without creating conversation state', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-invalid-inbound-time-')); const runtime = await createRuntime({ repoRoot: root, peerId: 'peer-1' });
+    runtime.qq.pushInbound({ peerId: 'peer-1', context: 'private', messageId: 'invalid-time', text: 'hello', at: 'not-a-date' });
+    expect(await runtime.processNext()).toBeNull(); expect(await runtime.queryMainConversation()).toBe('');
+  });
 });

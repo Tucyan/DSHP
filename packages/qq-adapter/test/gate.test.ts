@@ -25,4 +25,10 @@ describe('QQ single-user gate', () => {
     expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'x'.repeat(257), text: 'hello' })).toBeNull();
     expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'bad\u0000id', text: 'hello' })).toBeNull();
   });
+  it('rejects malformed, out-of-range, and oversized inbound timestamps/text', () => {
+    const gate = new SingleUserQqGate(cfg, () => '2026-08-27T10:00:00.000Z');
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'bad-time', text: 'hello', at: 'not-a-date' })).toBeNull();
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'old-time', text: 'hello', at: '1900-01-01T00:00:00.000Z' })).toBeNull();
+    expect(gate.accept({ peerId: 'u-1', context: 'private', messageId: 'large-text', text: 'x'.repeat(4097), at: '2026-08-27T10:00:00.000Z' })).toBeNull();
+  });
 });

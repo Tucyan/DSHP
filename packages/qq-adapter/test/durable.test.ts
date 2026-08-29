@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, access, readFile } from 'node:fs/promises';
+import { mkdtemp, access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { QqDurableStateStore } from '../src/durable.js';
@@ -53,10 +53,50 @@ describe('QQ durable binding and outbound ledger', () => {
   it('leases inbound claims across runtimes and allows only an expired lease to recover', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-inbound-')); const statePath = path.join(root, 'data', 'qq-state.json'); let now = '2026-08-27T10:00:00.000Z';
     const first = await QqDurableStateStore.open(statePath, root, () => now); const second = await QqDurableStateStore.open(statePath, root, () => now);
-    expect(await first.claimInbound('message')).toBe('claimed'); expect(await second.claimInbound('message')).toBe('pending');
+    const trigger = { type: 'user_message' as const, sessionId: 'qq:u-1', text: 'hello', at: now };
+    await first.enqueueInbound('message', trigger); expect(await first.claimInbound('message')).toBe('claimed'); expect(await second.claimInbound('message')).toBe('pending');
     now = '2026-08-27T10:00:31.000Z'; expect(await second.claimInbound('message')).toBe('claimed');
     await expect(first.failInbound('message')).rejects.toMatchObject({ code: 'INBOUND_STATE' });
     await second.completeInbound('message'); expect(await first.claimInbound('message')).toBe('completed');
+  });
+  it('replays a queued inbound payload after restart without a new stream event', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-inbox-')); const statePath = path.join(root, 'data', 'qq-state.json'); const now = '2026-08-27T10:00:00.000Z';
+    const first = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, () => now); await first.ready();
+    await first.enqueueInbound('queued-message', { type: 'user_message', sessionId: 'qq:u-1', text: 'queued', at: now });
+    const restored = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, () => now); const envelope = await restored.receiveEnvelope();
+    expect(envelope).toMatchObject({ messageId: 'queued-message', trigger: { text: 'queued' } });
+  });
+  it('durably enqueues accepted stream events before delivering them', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-stream-inbox-')); const statePath = path.join(root, 'data', 'qq-state.json');
+    async function* stream() { yield { peerId: 'u-1', context: 'private' as const, messageId: 'stream-message', text: 'streamed', at: '2026-08-27T10:00:00.000Z' }; }
+    const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, () => '2026-08-27T10:00:00.000Z', stream());
+    expect(await port.receiveEnvelope()).toMatchObject({ messageId: 'stream-message' });
+    const restored = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, () => '2026-08-27T10:00:31.000Z');
+    expect(await restored.receiveEnvelope()).toMatchObject({ messageId: 'stream-message' });
+  });
+  it('reclaims an expired pending stream event without waiting forever for new input', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-stream-expired-')); const statePath = path.join(root, 'data', 'qq-state.json'); const now = '2026-08-27T10:00:00.000Z';
+    const firstStore = await QqDurableStateStore.open(statePath, root, () => now); await firstStore.bind('u-1'); await firstStore.enqueueInbound('expired-stream', { type: 'user_message', sessionId: 'qq:u-1', text: 'recover', at: now }); await expect(firstStore.claimInbound('expired-stream')).resolves.toBe('claimed');
+    const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { inbound: Record<string, { leaseUntil: string }> }; persisted.inbound['expired-stream'].leaseUntil = '2026-08-27T10:00:00.040Z'; await writeFile(statePath, JSON.stringify(persisted));
+    const base = Date.parse(now); const started = Date.now(); const tickingNow = () => new Date(base + Date.now() - started).toISOString(); async function* noNewEvents() { yield await new Promise<never>(() => undefined); }
+    const restored = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, tickingNow, noNewEvents());
+    await expect(restored.receiveEnvelope()).resolves.toMatchObject({ messageId: 'expired-stream' });
+  });
+  it('reclaims an expired pending payload without a new stream or push event', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-queue-recovery-')); const statePath = path.join(root, 'data', 'qq-state.json'); const now = '2026-08-27T10:00:00.000Z';
+    const firstStore = await QqDurableStateStore.open(statePath, root, () => now); await firstStore.bind('u-1'); await firstStore.enqueueInbound('queued-recovery', { type: 'user_message', sessionId: 'qq:u-1', text: 'recover', at: now }); await firstStore.claimInbound('queued-recovery');
+    const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { inbound: Record<string, { leaseUntil: string }> }; persisted.inbound['queued-recovery'].leaseUntil = '2026-08-27T10:00:00.040Z'; await writeFile(statePath, JSON.stringify(persisted));
+    const base = Date.parse(now); const started = Date.now(); const tickingNow = () => new Date(base + Date.now() - started).toISOString(); const restored = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, tickingNow);
+    await expect(restored.receiveEnvelope()).resolves.toMatchObject({ messageId: 'queued-recovery' });
+  });
+  it('prunes completed outbound history before accepting new messages at the bound', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-ledger-bound-')); const statePath = path.join(root, 'data', 'qq-state.json');
+    const outbound = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`key-${index}`, { status: 'sent', occurrenceId: `occurrence-${index}` }]));
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, JSON.stringify({ binding: { peerId: 'u-1', context: 'private' }, outbound, inbound: {} }));
+    const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root); await port.ready();
+    await expect(port.send({ occurrenceId: 'new-occurrence', idempotencyKey: 'new-key', text: 'new', background: false })).resolves.toBe(true);
+    const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { outbound: Record<string, unknown> }; expect(Object.keys(persisted.outbound).length).toBe(10_000);
   });
   it('keeps independent concurrent keys in one durable state', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-'));
