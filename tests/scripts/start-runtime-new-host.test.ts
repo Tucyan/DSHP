@@ -10,7 +10,7 @@ describe('new host runtime launcher', () => {
     const launch = JSON.parse(result) as { command: string; args: string[]; cwd: string; env: Record<string, string> }
     expect(launch.command).toBe('node')
     expect(launch.args).toEqual([path.resolve('packages/dsh-host/dist/cli.js'), '--live-qq'])
-    expect(launch.cwd).toBe(path.resolve('.'))
+    expect(launch.cwd).toBe(path.resolve('workspace'))
     expect(launch.env.DSH_WORKSPACE).toBe(path.resolve('workspace'))
     expect(launch.env.PERSONAL_GROWTH_WORKSPACE).toBe(path.resolve('workspace'))
     expect(launch.env.QQBOT_ALLOWED_PEER_ID).toBe('12345')

@@ -18,9 +18,11 @@ export function getPersonalGrowthConfigPath(env: NodeJS.ProcessEnv = process.env
   return join(dshHome, 'profiles', 'personal-growth', 'cordis.yml')
 }
 
-export function assertLiveQqConfig(input: { peerId?: string; appId?: string; appSecret?: string }): void {
+export function normalizeLiveQqConfig(input: { peerId?: string; appId?: string; appSecret?: string }): { peerId: string; appId: string; appSecret: string } {
   const peerId = input.peerId
   const normalizedPeerId = peerId?.trim()
+  const appId = input.appId?.trim()
+  const appSecret = input.appSecret?.trim()
   const hasControl = peerId ? [...peerId].some(character => {
     const code = character.codePointAt(0) ?? 0
     return code <= 0x1f || code === 0x7f
@@ -28,9 +30,14 @@ export function assertLiveQqConfig(input: { peerId?: string; appId?: string; app
   if (!peerId || !normalizedPeerId || peerId !== normalizedPeerId || hasControl || /[\s:[\]"\\]/u.test(peerId)) {
     throw new Error('Live QQ requires one safe PeerId or QQ_PEER_ID.')
   }
-  if (!input.appId || !input.appSecret) {
+  if (!appId || !appSecret) {
     throw new Error('Live QQ requires QQBOT_APPID and QQBOT_SECRET in the process environment; no credential file is read.')
   }
+  return { peerId: normalizedPeerId, appId, appSecret }
+}
+
+export function assertLiveQqConfig(input: { peerId?: string; appId?: string; appSecret?: string }): void {
+  normalizeLiveQqConfig(input)
 }
 
 export function createIdempotentShutdown(dispose: () => Promise<void> | void, report: (error: unknown) => void = error => {
@@ -49,21 +56,21 @@ export async function runPersonalGrowthHost(env: NodeJS.ProcessEnv = process.env
   const liveQq = options.liveQq ?? process.argv.includes('--live-qq')
   if (!liveQq) throw new Error('Personal growth host CLI requires --live-qq; non-live mode is not supported.')
   const projectRoot = resolveProjectRoot(env)
-  env.DSH_HOME ??= join(projectRoot, 'runtime', 'dsh-home')
-  env.DSH_AGENTS_HOME ??= join(projectRoot, 'runtime', 'agents-home')
+  if (!env.DSH_HOME?.trim()) env.DSH_HOME = join(projectRoot, 'runtime', 'dsh-home')
+  if (!env.DSH_AGENTS_HOME?.trim()) env.DSH_AGENTS_HOME = join(projectRoot, 'runtime', 'agents-home')
   const workspace = resolvePersonalGrowthWorkspace(env)
   env.PERSONAL_GROWTH_WORKSPACE = workspace
   env.DSH_WORKSPACE = workspace
-  assertLiveQqConfig({ peerId: env.QQBOT_ALLOWED_PEER_ID, appId: env.QQBOT_APP_ID, appSecret: env.QQBOT_APP_SECRET })
+  const qqConfig = normalizeLiveQqConfig({ peerId: env.QQBOT_ALLOWED_PEER_ID, appId: env.QQBOT_APP_ID, appSecret: env.QQBOT_APP_SECRET })
   const configPath = getPersonalGrowthConfigPath(env)
   await mkdir(resolve(configPath, '..'), { recursive: true })
   await writeFile(configPath, '[]\n', { flag: 'wx' }).catch(error => {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   })
   const ctx = await bootPersonalGrowth(configPath, {
-    appId: env.QQBOT_APP_ID,
-    appSecret: env.QQBOT_APP_SECRET,
-    allowedPeerId: env.QQBOT_ALLOWED_PEER_ID,
+    appId: qqConfig.appId,
+    appSecret: qqConfig.appSecret,
+    allowedPeerId: qqConfig.peerId,
     accountId: env.QQBOT_ACCOUNT_ID,
   })
   const dispose = (ctx as unknown as { dispose?: () => Promise<void> }).dispose

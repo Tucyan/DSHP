@@ -8,10 +8,12 @@ vi.mock('../src/composition.js', () => ({
   bootPersonalGrowth: vi.fn().mockResolvedValue({ dispose: vi.fn().mockResolvedValue(undefined) }),
 }))
 import * as cli from '../src/cli.js'
+import { bootPersonalGrowth } from '../src/composition.js'
 
 type CliConfig = {
   createIdempotentShutdown: (dispose: () => Promise<void> | void, report?: (error: unknown) => void) => () => Promise<void>
   assertLiveQqConfig: (input: { peerId: string; appId: string; appSecret: string }) => void
+  normalizeLiveQqConfig: (input: { peerId?: string; appId?: string; appSecret?: string }) => { peerId: string; appId: string; appSecret: string }
   getPersonalGrowthConfigPath: (env: NodeJS.ProcessEnv) => string
   resolveProjectRoot: (env?: NodeJS.ProcessEnv, moduleUrl?: string) => string
   resolvePersonalGrowthWorkspace: (env: NodeJS.ProcessEnv) => string
@@ -39,6 +41,9 @@ describe('personal growth host CLI configuration', () => {
     expect(configuredCli.getPersonalGrowthConfigPath({ DSH_HOME: dshHome })).toBe(
       resolve(dshHome, 'profiles', 'personal-growth', 'cordis.yml'),
     )
+    expect(configuredCli.getPersonalGrowthConfigPath({ DSH_HOME: '   ' })).toBe(
+      resolve('runtime', 'dsh-home', 'profiles', 'personal-growth', 'cordis.yml'),
+    )
   })
 
   it('validates live QQ peer and credentials without reading credential files', () => {
@@ -47,6 +52,31 @@ describe('personal growth host CLI configuration', () => {
     expect(() => configuredCli.assertLiveQqConfig({ peerId: '12345', appId: '', appSecret: 'secret' })).toThrow(/QQBOT_APPID/)
     expect(() => configuredCli.assertLiveQqConfig({ peerId: ' 12345', appId: 'appid', appSecret: 'secret' })).toThrow(/PeerId/)
     expect(() => configuredCli.assertLiveQqConfig({ peerId: '12345 ', appId: 'appid', appSecret: 'secret' })).toThrow(/PeerId/)
+    expect(() => configuredCli.assertLiveQqConfig({ peerId: '12345', appId: '   ', appSecret: 'secret' })).toThrow(/QQBOT_APPID/)
+    expect(() => configuredCli.assertLiveQqConfig({ peerId: '12345', appId: 'appid', appSecret: '   ' })).toThrow(/QQBOT_SECRET/)
+    expect(configuredCli.normalizeLiveQqConfig({ peerId: '12345', appId: ' appid ', appSecret: ' secret ' })).toEqual({
+      peerId: '12345', appId: 'appid', appSecret: 'secret',
+    })
+  })
+
+  it('replaces blank runtime paths with project-local isolated defaults before boot', async () => {
+    const env: NodeJS.ProcessEnv = { DSH_HOME: '  ', DSH_AGENTS_HOME: '\t', DSH_WORKSPACE: '  ', PERSONAL_GROWTH_WORKSPACE: '', QQBOT_ALLOWED_PEER_ID: '12345' }
+    await expect(configuredCli.runPersonalGrowthHost(env, { liveQq: true })).rejects.toThrow(/QQBOT_APPID/)
+    expect(env.DSH_HOME).toBe(resolve('runtime', 'dsh-home'))
+    expect(env.DSH_AGENTS_HOME).toBe(resolve('runtime', 'agents-home'))
+    expect(env.DSH_WORKSPACE).toBe(resolve('workspace'))
+    expect(env.PERSONAL_GROWTH_WORKSPACE).toBe(resolve('workspace'))
+  })
+
+  it('passes normalized QQ credentials to the boot composition', async () => {
+    const boot = vi.mocked(bootPersonalGrowth)
+    boot.mockClear()
+    await configuredCli.runPersonalGrowthHost({
+      QQBOT_ALLOWED_PEER_ID: '12345', QQBOT_APP_ID: ' appid ', QQBOT_APP_SECRET: ' secret ',
+    }, { liveQq: true })
+    expect(boot).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      appId: 'appid', appSecret: 'secret', allowedPeerId: '12345',
+    }))
   })
 
   it('requires explicit live mode before booting the QQ host', async () => {
