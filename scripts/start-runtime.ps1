@@ -19,7 +19,7 @@ if ($LiveQQ) {
   if (-not $livePeer -or $livePeer -match '[\s\x00-\x1F\x7F]' -or $livePeer.Contains(':') -or $livePeer.Contains('[') -or $livePeer.Contains(']') -or $livePeer.Contains('"') -or $livePeer.Contains('\')) { throw 'Live QQ requires one safe -PeerId or QQ_PEER_ID.' }
 }
 if ($DryRun) {
-  if ($LiveQQ) { $dryArgs = @('node', (Join-Path $repo 'packages/dsh-host/dist/cli.js'), '--live-qq'); $dryCwd = $repo; $dryCommand = 'node' } else { $dryArgs = @('--filter','@personal-growth/dsh-adapter','exec','dsh','web','--patch',$disabledPatch,'--port', [string]$config.webPort); $dryCwd = $config.workspace; $dryCommand = 'corepack' }
+  if ($LiveQQ) { $dryArgs = @((Join-Path $repo 'packages/dsh-host/dist/cli.js'), '--live-qq'); $dryCwd = $repo; $dryCommand = 'node' } else { $dryArgs = @('--filter','@personal-growth/dsh-adapter','exec','dsh','web','--patch',$disabledPatch,'--port', [string]$config.webPort); $dryCwd = $config.workspace; $dryCommand = 'corepack' }
   [ordered]@{ command=$dryCommand; args=if ($dryCommand -eq 'corepack') { @('pnpm@11.7.0') + $dryArgs } else { $dryArgs }; cwd=$dryCwd; env=@{ DSH_HOME=$env:DSH_HOME; DSH_AGENTS_HOME=$env:DSH_AGENTS_HOME; DSH_WORKSPACE=$env:DSH_WORKSPACE; PERSONAL_GROWTH_WORKSPACE=$env:PERSONAL_GROWTH_WORKSPACE; PGA_RUNTIME_ROOT=$env:PGA_RUNTIME_ROOT; PGA_PLUGINS_DIR=$env:PGA_PLUGINS_DIR; PGA_SKILLS_DIR=$env:PGA_SKILLS_DIR; PGA_SESSIONS_DIR=$env:PGA_SESSIONS_DIR; PGA_STORAGE_DIR=$env:PGA_STORAGE_DIR; PGA_CREDENTIALS_DIR=$env:PGA_CREDENTIALS_DIR; QQBOT_ALLOWED_PEER_ID=$livePeer }; webPort=$config.webPort } | ConvertTo-Json -Depth 4; exit 0
 }
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'init-runtime.ps1')
