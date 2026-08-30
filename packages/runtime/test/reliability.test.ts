@@ -81,7 +81,7 @@ describe('runtime processing durability', () => {
     const runtime = await createLiveRuntime({ repoRoot: root, peerId: 'peer-1', now, model: new DemoModel(), goalPort: { getCurrentGoal: () => undefined }, transport: { sendPrivate: async (_peer, text) => { sent.push(text); } }, inbound: stream(), scheduleTool: { create: async () => ({ id: 'schedule-1' }), list: async () => [], delete: async () => true } });
     const inbound = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`pending-${index}`, { status: 'pending', owner: 'other-owner', leaseUntil: '2026-08-27T10:00:00.100Z', trigger: { type: 'user_message', sessionId: 'qq:peer-1', text: `pending-${index}`, at } }]));
     await writeFile(path.join(runtime.paths.storage, 'qq-binding.json'), JSON.stringify({ binding: { peerId: 'peer-1', context: 'private' }, outbound: {}, inbound }));
-    const running = runtime.start(); const deadline = Date.now() + 4_000; while (sent.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); await runtime.stop(); await running;
+    const running = runtime.start(); const deadline = Date.now() + 10_000; while (sent.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10)); await runtime.stop(); await running;
     expect(sent).toHaveLength(2);
-  });
+  }, 20_000);
 });

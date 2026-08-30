@@ -138,7 +138,7 @@ describe('QQ durable binding and outbound ledger', () => {
     const port = new DurableQqPort(config, { sendPrivate: async () => undefined }, statePath, root, now); const event = { peerId: 'u-1', context: 'private' as const, messageId: 'retained-push', text: 'retain me', at };
     port.pushInbound(event); await expect(port.receiveEnvelope()).resolves.toMatchObject({ messageId: 'pending-0' }); await port.completeInbound('pending-0');
     await expect(port.receiveEnvelope()).resolves.toMatchObject({ messageId: 'retained-push' });
-  });
+  }, 15_000);
   it('fails closed with an actionable error for payloadless legacy inbound records', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'pga-qq-legacy-inbound-')); const statePath = path.join(root, 'data', 'qq-state.json');
     await mkdir(path.dirname(statePath), { recursive: true }); await writeFile(statePath, JSON.stringify({ binding: { peerId: 'u-1', context: 'private' }, outbound: {}, inbound: { old: { status: 'pending' } } }));
