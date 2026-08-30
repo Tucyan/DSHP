@@ -6,7 +6,7 @@ Build and verify a single-user Personal Growth Agent v0.1 on an isolated DSH ins
 
 ## Current Phase
 
-Phase 5
+Phase 6
 
 ## Phases
 
@@ -45,20 +45,20 @@ Phase 5
 
 ### Phase 5: End-to-End Autonomous Loop
 
-- [ ] Connect conversation consolidation, Dream proposals, memory writes, and profile rebuilding
-- [ ] Connect background maintenance and foreground contact decisions
-- [ ] Connect schedule and QQ proactive messaging
-- [ ] Add Skill creation and Plugin proposal workflows with approval boundaries
-- [ ] Add trace queries and hidden-background-session behavior
-- **Status:** in_progress
+- [x] Connect conversation consolidation, Dream proposals, memory writes, and profile rebuilding
+- [x] Connect background maintenance and foreground contact decisions
+- [x] Connect schedule and QQ proactive messaging
+- [x] Add Skill creation and Plugin proposal workflows with approval boundaries
+- [x] Add trace queries and hidden-background-session behavior
+- **Status:** complete
 
 ### Phase 6: Verification, Documentation, and Handoff
 
-- [ ] Run full unit, integration, build, lint, and isolation checks
-- [ ] Run final subagent review against every v0.1 success criterion
-- [ ] Document configuration, credentials, operations, recovery, and known limitations
+- [x] Run full unit, integration, build, lint, and isolation checks
+- [x] Run final subagent review against every v0.1 success criterion
+- [x] Document configuration, credentials, operations, recovery, and known limitations
 - [ ] Present branch integration options
-- **Status:** pending
+- **Status:** in_progress
 
 ## Key Questions
 
@@ -84,6 +84,8 @@ Phase 5
 |-------|---------|------------|
 | Workspace was not a Git repository | 1 | Treat as a greenfield project; initialize a repository and feature branch before production code |
 | Initial combined skill read was truncated | 1 | Re-read each required skill file in smaller complete groups |
+| Offline dependency refresh was blocked by ignored native build scripts | 1 | Did not retry installation; used the existing workspace toolchain and synchronized only the required lock importer |
+| Final narrow subagent rechecks hit the shared usage limit | 1 | Retained prior independent findings and completed the narrow code inspection plus fresh root verification locally |
 
 ## Notes
 

@@ -3,7 +3,7 @@
 ## Runtime flow
 
 ```text
-QQ / local demo / DSH schedule / heartbeat worker
+QQ Host Bridge / local demo / DSH schedule / heartbeat worker
                     |
                     v
              AgentRuntime.handle(trigger)
@@ -20,7 +20,7 @@ history.jsonl -> DreamProposal -> MemoryService -> Memory Tree
                                              `-> PROFILE.md
 ```
 
-All wake paths use the same `AgentRuntime` entry point. Domain packages do not import DSH, QQ, or wall-clock globals; adapters supply those ports.
+本地 deterministic Demo 的 wake paths 使用 `AgentRuntime` composition root；正式 QQ 由 `@personal-growth/dsh-host` 组合 DSH public Agent/Session/Schedule API、腾讯 QQBot、Memory 与 Heartbeat。两条 composition 共用相同的 domain services、策略和持久化边界，但正式 Host 不依赖 QQ bundle 私有 API。
 
 ## Package boundaries
 
@@ -29,8 +29,9 @@ All wake paths use the same `AgentRuntime` entry point. Domain packages do not i
 - `@personal-growth/personal-memory`: cursor-based consolidation, proposal validation, Memory Tree mutation, revision ledger, INDEX/PROFILE projections.
 - `@personal-growth/personal-heartbeat`: quiet hours, cooldown, daily cap, occurrence idempotency, foreground/background dispatch.
 - `@personal-growth/dsh-adapter`: isolated paths, DSH launch arguments, session/schedule interfaces, bundle/profile helpers.
-- `@personal-growth/qq-adapter`: single-user gate and proactive-send port; real deployment composes Tencent's QQ bundle.
+- `@personal-growth/qq-adapter`: single-user gate and durable inbox/outbox port used by the local Runtime; production Host uses the same single-user invariants with Tencent QQBot WebSocket.
 - `@personal-growth/runtime`: composition root, local deterministic model, end-to-end demo, operational state.
+- `@personal-growth/dsh-host`: production DSH/QQ composition, hidden agents, durable bridge state, session-event Memory pipeline, proactive policy gate.
 
 ## Storage ownership
 
@@ -52,12 +53,18 @@ workspace/
   data/
     heartbeat-state.json         operational contact/occurrence state
     traces.jsonl                 operational trace ledger
+  .personal-growth/
+    bridge-state.json            live inbound/outbound, memory turns, leases and sequence state
+    trace.jsonl                  live host redacted trace
 runtime/
+  dsh-home/                      isolated DSH profile and configuration
+  agents-home/                   isolated DSH agents and versioned Skills
   storage/
-    qq-binding.json              fixed authorized peer and outbound ledger
-    schedules.json               DSH schedule bindings and pending state
+    qq-binding.json              local Runtime/Demo durable inbox/outbox
+    schedules.json               local Runtime/Demo schedule bindings
   sessions/background/*.jsonl    hidden maintenance records
   plugin-proposals/*.md          reviewable extension proposals (append-only; pending approval)
+  extension-trace.jsonl          separate extension-writer audit
 ```
 
 ## Safety invariants
@@ -69,6 +76,8 @@ runtime/
 5. Every proactive message requires a passed contact policy and a deduplicated occurrence key.
 6. Skills may be created in the isolated Agents home; plugin code remains a proposal pending human deployment approval.
 7. Credentials are environment references and never enter traces, memory, or committed files.
+8. Live inbound completion occurs only after its durable Memory turn succeeds; a failed turn remains recoverable.
+9. Foreground proactive output is sent only after Heartbeat policy admission; ordinary QQ replies must belong to the currently active authorized inbound message.
 
 ## Heartbeat v0.1 trust boundary
 

@@ -24,7 +24,7 @@
 - Official app-boot docs define a profile under `$DSH_HOME/profiles/<name>` with a package manifest and ordered bundle layers; out-of-tree bundles declare `dsh.bundle.patch`.
 - Official skill-filesystem docs confirm `$DSH_HOME` defaults to `~/.dsh` and `$DSH_AGENTS_HOME` defaults to `~/.agents`; isolated skill discovery can disable default roots.
 - The in-box `@deepseek-ai/dsh-schedule` exposes `schedule_create`, `schedule_list`, and `schedule_delete`, persists inside the current Session, and supports delay, absolute time, and fixed intervals of at least 300 seconds.
-- Tencent maintains `@tencent-connect/dsh-qqbot`; current repository manifest version is `0.4.0`, with deterministic QQ peer-to-DSH Session mapping and restart recovery.
+- Tencent maintains both a DSH QQ integration and the lower-level `@tencent-connect/qqbot-nodejs` SDK. The production Host uses the latter's public WebSocket API so it can enforce this project's single-user gate and durable completion boundary directly.
 - Tencent's QQ plugin supports QR binding or `QQBOT_APPID`/`QQBOT_SECRET`, direct/group prompts, agent preset selection, and assistant-output forwarding to QQ.
 - The QQ plugin peer-depends on DSH agent/session/LLM packages `>=0.1.0-rc.6`, so it is compatible in principle with pinned DSH `0.1.1-rc.2`; live compatibility still needs a smoke test.
 - For the single-user requirement, the project must add an explicit fixed-user gate around inbound handling/configuration because the upstream plugin supports multiple peers by default.
@@ -45,7 +45,7 @@
 | Background action allow-list | Structurally forbids `MESSAGE_USER` during hidden maintenance runs |
 | Pin `@deepseek-ai/dsh` to `0.1.1-rc.2` and record upstream commit separately | Avoids following a moving prerelease while preserving the source baseline used for API review |
 | Separate session reminders from deployment heartbeat scheduling | Official DSH Schedule is session-local; background autonomy needs a durable deployment-level wake mechanism |
-| Integrate Tencent `@tencent-connect/dsh-qqbot@0.4.0` instead of developing a QQ protocol stack | It is purpose-built for DSH, uses deterministic persistent sessions, and supports QR credential binding |
+| Use Tencent `@tencent-connect/qqbot-nodejs@1.0.4` in the production Host | Keeps the QQ protocol in the official SDK while allowing the Host to enforce fixed-peer authorization, durable Memory completion, and proactive-contact policy |
 | Keep heartbeat delivery idempotent and record occurrence keys | DSH Schedule is at-least-once around crash windows and background scheduling is outside cold Sessions |
 | Use DSH Session as the conversation source while retaining domain-owned semantic memory files | Avoids duplicating raw chat persistence while preserving the requested Memory Tree semantics |
 | Persistence read APIs require Zod schemas | Syntactically valid but structurally invalid state must fail at the boundary rather than flow into domain logic |
@@ -68,6 +68,10 @@
 | Heartbeat lock contention exposed missing-owner and unsafe-release races | Replaced the lock directory protocol with an exclusive owner file, bounded transient retries, stale-owner proof, and atomic token tombstones |
 | Initial adapters passed functional tests but lost updates across reconstructed instances | Added shared strict durable transactions, ownership-safe locking, post-mutation schema validation, and concurrency regressions |
 | Tencent's empty allowlist is not fail-closed | Added a disabled default patch and a two-phase managed single-peer overlay |
+| A Host turn could be acknowledged before semantic Memory persisted | Added a durable memory-turn journal; QQ inbound completion now waits for Memory consume, and lease-based recovery preserves original sequence numbers |
+| Foreground/session events could bypass contact policy | Direct replies now require the currently active QQ message ID; schedule and proactive messages can only be emitted from the Heartbeat policy result |
+| QQ durable inbox initially stored only claims, not payloads | Persist queued/pending/completed payloads, reclaim expired leases without source redelivery, and apply bounded backpressure instead of treating capacity as EOF |
+| Direct Host loading could drift outside the isolated instance | CLI and plugin apply share lexical/canonical path validation and delay every writer, listener, and bot start until validation succeeds |
 
 ## Resources
 
