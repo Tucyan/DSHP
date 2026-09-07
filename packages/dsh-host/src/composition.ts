@@ -1,7 +1,7 @@
 import { loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 
 export interface HostPatchOptions {
@@ -32,7 +32,7 @@ export function basePatchPath(): string {
 }
 
 export function hostModulePath(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), 'plugin.js')
+  return pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), 'plugin.js')).href
 }
 
 export function loadBaseAndHostPatches(hostConfig: Record<string, unknown> = {}): unknown[] {

@@ -198,12 +198,21 @@ export class PersonalGrowthBridge {
   }
 
   /** Run one foreground proactive turn through the same durable foreground agent. */
-  async runForegroundWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<void> {
+  async runForegroundWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<unknown> {
     if (!this.started || !this.options.heartbeat) return
     const result = await this.options.heartbeat.wakeForeground(input) as { action?: { type?: string; text?: string } } | undefined
     if (result?.action?.type === 'MESSAGE_USER' && result.action.text?.trim()) {
       await this.sendOutbound(`${sessionIdForPeer(this.options.allowedPeerId)}:heartbeat:${input.occurrenceId}`, { peerId: this.options.allowedPeerId }, result.action.text)
     }
+    return result
+  }
+
+  /** Opens the fixed foreground owner for explicit management operations only. */
+  async ensureForeground(): Promise<void> {
+    if (!this.started) throw new Error('bridge is stopped')
+    const task = this.processing.then(async () => { await this.getForeground() })
+    this.processing = task.catch(() => undefined)
+    return task
   }
 
   /** Sends only the assistant reply for the currently-owned QQ turn. */

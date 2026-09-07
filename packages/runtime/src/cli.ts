@@ -1,6 +1,7 @@
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createLiveRuntime, createRuntime } from './runtime.js';
 import type { QqInbound, QqTransport } from '@personal-growth/qq-adapter';
 import type { DshLiveScheduleTool } from '@personal-growth/dsh-adapter';
@@ -26,4 +27,8 @@ export async function runLive(repoRoot: string, ports?: { transport: QqTransport
   const done = runtime.start({ cadenceMs: 1000, keepAlive: false, runImmediately: false, ...(ports.worker ?? {}) }); return { runtime, done, stop: () => runtime.stop() };
 }
 
-if (process.argv[1]?.endsWith('cli.js')) runDemo().then((summary) => console.log(summary)).catch((error) => { console.error(error instanceof Error ? error.message : 'runtime failed'); process.exitCode = 1; });
+export function isDemoEntrypoint(argv1: string | undefined = process.argv[1], moduleUrl = import.meta.url): boolean {
+  return argv1 !== undefined && path.resolve(argv1) === path.resolve(fileURLToPath(moduleUrl));
+}
+
+if (isDemoEntrypoint()) runDemo().then((summary) => console.log(summary)).catch((error) => { console.error(error instanceof Error ? error.message : 'runtime failed'); process.exitCode = 1; });

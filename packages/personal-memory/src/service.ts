@@ -82,9 +82,20 @@ export class MemoryService {
   }
   consolidate(events: readonly ConversationEvent[]): Promise<HistoryRecord | null> { return this.consume(events); }
 
-  apply(proposal: MemoryProposal): Promise<MutationResult> {
+  async revisions(): Promise<RevisionRecord[]> {
+    await this.ensureReady();
+    return withWorkspaceLock(this.paths.root, async () => {
+      await assertOperationalPaths(this.paths);
+      const result = await readJsonl(this.paths.revisions, RevisionSchema);
+      if (result.errors.length) throw new Error('Malformed revision ledger');
+      return result.records;
+    }, this.lockTimeoutMs);
+  }
+
+  apply(proposal: MemoryProposal, context?: { actor: string }): Promise<MutationResult> {
     const parsed = ProposalSchema.parse(proposal);
-    const operation = this.queue.then(async () => { await this.ensureReady(); return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); return this.applyNow(parsed); }, this.lockTimeoutMs); });
+    const actor = context ? z.string().min(1).max(100).regex(/^[\w-]+$/).parse(context.actor) : this.actor;
+    const operation = this.queue.then(async () => { await this.ensureReady(); return withWorkspaceLock(this.paths.root, async () => { await assertOperationalPaths(this.paths); await this.recoverPending(); return this.applyNow(parsed, actor); }, this.lockTimeoutMs); });
     this.queue = operation.catch(() => undefined);
     return operation;
   }
@@ -114,7 +125,7 @@ export class MemoryService {
     return ProposalSchema.parse({ action: expectedHash ? 'UPDATE' : 'CREATE', ...input, path, sourceEvidence: input.sourceEvidence ?? ['explicit:user'], expectedHash });
   }
 
-  private async applyNow(proposal: MemoryProposal): Promise<MutationResult> {
+  private async applyNow(proposal: MemoryProposal, actor = this.actor): Promise<MutationResult> {
     const revisionLedger = await readJsonl(this.paths.revisions, RevisionSchema);
     if (revisionLedger.errors.length) throw new Error(`Malformed revisions.jsonl: ${revisionLedger.errors.map((error) => error.line).join(',')}`);
     if (proposal.action !== 'IGNORE') {
@@ -133,7 +144,7 @@ export class MemoryService {
     if (proposal.action === 'CREATE') {
       if (await this.exists(proposal.path)) throw new Error(`Memory already exists: ${proposal.path}`);
       const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, source, proposal.importance, proposal.frequency);
-      const revision = this.makeRevision('CREATE', proposal.path, source, undefined, raw);
+      const revision = this.makeRevision('CREATE', proposal.path, source, undefined, raw, actor);
       await this.persistPending({ action: 'CREATE', path: proposal.path, source, beforeHash: null, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
       return { accepted: true, action: 'CREATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
@@ -142,7 +153,7 @@ export class MemoryService {
     if (proposal.action === 'UPDATE') {
       const mergedSources = [...new Set([...current.metadata.sources, ...source])];
       const raw = this.buildRaw(proposal.path, proposal.summary, proposal.content, mergedSources, proposal.importance ?? current.metadata.importance, proposal.frequency ?? current.metadata.frequency, current.metadata.createdAt);
-      const revision = this.makeRevision('UPDATE', proposal.path, source, current.raw, raw);
+      const revision = this.makeRevision('UPDATE', proposal.path, source, current.raw, raw, actor);
       await this.persistPending({ action: 'UPDATE', path: proposal.path, source, beforeHash: current.hash, afterHash: hash(raw), afterRaw: raw, revision }); await this.completePending();
       return { accepted: true, action: 'UPDATE', path: proposal.path, revision, trace: { result: 'applied' } };
     }
@@ -152,7 +163,7 @@ export class MemoryService {
       const mergedSources = [...new Set([...current.metadata.sources, ...target.metadata.sources, ...source])];
       const raw = renderMemoryDocument(MemoryMetadataSchema.parse({ category: target.metadata.category, summary: proposal.summary, importance: proposal.importance ?? target.metadata.importance, frequency: proposal.frequency ?? target.metadata.frequency, sources: mergedSources, createdAt: target.metadata.createdAt ?? this.clock(), updatedAt: this.clock() }), proposal.content);
       const archiveRaw = this.archiveRaw(current, source);
-      const revision = this.makeRevision('MERGE', proposal.targetPath, source, target.raw, raw);
+      const revision = this.makeRevision('MERGE', proposal.targetPath, source, target.raw, raw, actor);
       await this.persistPending({ action: 'MERGE', path: proposal.path, writePath: proposal.targetPath, targetPath: `archive/${proposal.path.split('/').at(-1)}`, source, beforeHash: hash(current.raw), targetBeforeHash: hash(target.raw), archiveHash: hash(archiveRaw), afterHash: hash(raw), afterRaw: raw, archiveRaw, revision });
       await this.completePending();
       return { accepted: true, action: 'MERGE', path: proposal.targetPath, revision, trace: { result: 'applied' } };
@@ -160,7 +171,7 @@ export class MemoryService {
     if (proposal.path.startsWith('archive/')) throw new Error('Memory is already archived');
     const archivedPath = `archive/${proposal.path.split('/').at(-1)}`;
     const archiveRaw = this.archiveRaw(current, source);
-    const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, archiveRaw);
+    const revision = this.makeRevision('ARCHIVE', proposal.path, source, current.raw, archiveRaw, actor);
     await this.persistPending({ action: 'ARCHIVE', path: proposal.path, targetPath: archivedPath, targetBeforeHash: null, source, beforeHash: current.hash, archiveHash: hash(archiveRaw), afterHash: hash(archiveRaw), afterRaw: archiveRaw, archiveRaw, revision });
     await this.completePending();
     return { accepted: true, action: 'ARCHIVE', path: proposal.path, revision, trace: { result: 'applied' } };
@@ -171,10 +182,10 @@ export class MemoryService {
     const metadata = MemoryMetadataSchema.parse({ category: path.split('/')[0], summary, importance, frequency, sources, createdAt: createdAt ?? this.clock(), updatedAt: this.clock() });
     return renderMemoryDocument(metadata, content);
   }
-  private makeRevision(action: 'CREATE' | 'UPDATE' | 'MERGE' | 'ARCHIVE', path: string, source: string[], beforeRaw: string | undefined, afterRaw: string): RevisionRecord {
+  private makeRevision(action: 'CREATE' | 'UPDATE' | 'MERGE' | 'ARCHIVE', path: string, source: string[], beforeRaw: string | undefined, afterRaw: string, actor = this.actor): RevisionRecord {
     const beforeHash = beforeRaw ? hash(beforeRaw) : null;
     const afterHash = hash(afterRaw);
-    return RevisionSchema.parse({ revisionId: `${action.toLocaleLowerCase()}-${path}-${afterHash.slice(0, 16)}`, time: this.clock(), actor: this.actor, action, path, source, beforeHash, afterHash });
+    return RevisionSchema.parse({ revisionId: `${action.toLocaleLowerCase()}-${path}-${afterHash.slice(0, 16)}`, time: this.clock(), actor, action, path, source, beforeHash, afterHash });
   }
   private async readState(): Promise<State> { await assertOperationalPaths(this.paths); try { return StateSchema.parse(await readJson(this.paths.state, StateSchema)); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { memoryCursor: {} }; throw error; } }
   private async persistPending(pending: z.infer<typeof PendingSchema>): Promise<void> { const state = await this.readState(); state.pendingMutation = pending; await assertWorkspacePath(this.paths, this.paths.state); await writeJsonAtomic(this.paths.state, state); }

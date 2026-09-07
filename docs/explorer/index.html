@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Personal Growth · 运行架构</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#"><span class="brand-icon">pg<span>↗</span></span><span>Personal Growth<small>AGENT SYSTEM / v0.1</small></span></a>
+    <div class="sidebar-label">SYSTEM EXPLORER</div>
+    <h2>跟随一次运行</h2>
+    <nav id="scenarios" aria-label="选择运行场景"></nav>
+    <div class="sidebar-note"><span class="tiny-dot"></span> 独立实例 · 单用户<small>长期理解 → 辅助行动 → 观察反馈<br>→ 更新理解 → 持续成长</small></div>
+    <div class="sidebar-bottom">DSH + Plugins + Skills<span>运行架构说明 · 本地交互示意</span></div>
+  </aside>
+  <main>
+    <header class="topbar"><span>WORKSPACE <b>/</b> 运行架构</span><span class="demo-label"><i></i> 示例数据 · 非实时监控</span></header>
+    <section class="heading"><div><div class="eyebrow">AN AGENT THAT GROWS WITH YOU</div><h1>看见 Agent 如何运行<span>。</span></h1><p>从一条消息，到一次理解。沿着数据流，探索系统如何记忆、思考与行动。</p></div><div class="version-stamp">01<span>ARCHITECTURE<br>EXPLORER</span></div></section>
+    <section class="metrics" aria-label="架构概览">
+      <div><span>运行内核</span><strong>DSH <small>0.1.1-rc.2</small></strong><p>Agent · Session · Tools</p></div>
+      <div><span>生产编排</span><strong>dsh-host</strong><p>QQ WebSocket · 单用户前台会话</p></div>
+      <div><span>长期语义真源</span><strong>Memory Tree</strong><p>受控 Proposal · 派生 PROFILE</p></div>
+      <div><span>自主唤醒</span><strong>双 Heartbeat</strong><p>前台 60 分钟 · 后台 30 分钟（默认）</p></div>
+    </section>
+    <section class="workspace">
+      <div class="flow-panel">
+        <div class="panel-title"><div><span class="section-kicker" id="scenario-code"></span><h2 id="scenario-title"></h2></div><span class="pill" id="scenario-tag"></span></div>
+        <p class="scenario-intro" id="scenario-intro"></p>
+        <div class="map" id="map" aria-label="模块流程图"></div>
+        <div class="map-legend"><span><i class="legend-active"></i>当前步骤</span><span><i class="legend-done"></i>已经过</span><span>点击模块查看职责</span></div>
+        <div class="playback"><button id="play" class="primary">▶ 播放流程</button><button id="next" class="secondary">下一步 →</button><button id="reset" class="text-button">重置</button><span id="counter"></span><div class="progress"><div id="progress"></div></div></div>
+        <div id="caveat" class="caveat" hidden></div>
+      </div>
+      <aside class="inspector" aria-label="当前步骤说明">
+        <div class="inspector-head"><span>STEP INSPECTOR</span><span id="step-number"></span></div>
+        <div id="step-content" aria-live="polite"></div>
+        <div class="inspector-source"><span>代码入口</span><code id="source"></code></div>
+      </aside>
+    </section>
+    <section class="journey-panel"><div class="section-header"><h2>这一次，发生了什么</h2><span>选择任意步骤，跳转查看</span></div><div id="timeline" class="timeline"></div></section>
+    <section class="bottom-grid">
+      <div class="storage-panel"><div class="section-header"><h2>数据在哪里留下来</h2><span>持久化地图</span></div><div class="tabs" id="storage-tabs" role="tablist" aria-label="数据分类"></div><div id="storage-content" role="tabpanel"></div></div>
+      <div class="boundary-panel"><div class="section-kicker">RUNTIME BOUNDARIES</div><h2>同一套领域服务，<br>两个运行入口。</h2><div class="boundary-row"><span class="boundary-icon">↗</span><div><strong>正式 QQ / dsh-host</strong><p>直接组合 DSH Agent、Memory、Heartbeat 与腾讯 QQBot。真实模型由 DSH 配置。</p></div></div><div class="boundary-row"><span class="boundary-icon neutral">⌘</span><div><strong>本地 Demo / runtime</strong><p>AgentCore + 确定性模型 + 模拟通道，用于测试闭环与故障恢复。</p></div></div><div class="boundary-footer">本页是独立说明页面，不是聊天控制台。<br>没有连接运行中的 Agent，也不会发送 QQ 消息。</div></div>
+    </section>
+    <footer><span>PERSONAL GROWTH AGENT <b>／</b> 持续理解，逐渐成长。</span><span>基于本地 v0.1 源码整理 · 2026.09</span></footer>
+  </main>
+</body>
+</html>

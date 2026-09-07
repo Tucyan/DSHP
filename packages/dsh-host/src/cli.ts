@@ -6,7 +6,7 @@ import { resolveIsolatedPaths, validateIsolatedPathsAsync } from '@personal-grow
 
 export function resolveProjectRoot(env: NodeJS.ProcessEnv = process.env, moduleUrl = import.meta.url): string {
   const configured = env.PGA_REPO_ROOT?.trim()
-  return resolve(configured || dirname(fileURLToPath(moduleUrl)), '..', '..', '..')
+  return configured ? resolve(configured) : resolve(dirname(fileURLToPath(moduleUrl)), '..', '..', '..')
 }
 
 export function resolvePersonalGrowthWorkspace(env: NodeJS.ProcessEnv = process.env): string {
@@ -67,6 +67,8 @@ export async function runPersonalGrowthHost(env: NodeJS.ProcessEnv = process.env
   env.PERSONAL_GROWTH_WORKSPACE = workspace
   env.DSH_WORKSPACE = workspace
   const qqConfig = normalizeLiveQqConfig({ peerId: env.QQBOT_ALLOWED_PEER_ID, appId: env.QQBOT_APP_ID, appSecret: env.QQBOT_APP_SECRET })
+  const adminPort = Number(env.PGA_ADMIN_PORT ?? 3182)
+  if (!Number.isInteger(adminPort) || adminPort < 1024 || adminPort > 65535) throw new Error('PGA_ADMIN_PORT must be an integer from 1024 to 65535')
   const configPath = join(isolated.dshHome, 'profiles', 'personal-growth', 'cordis.yml')
   await mkdir(resolve(configPath, '..'), { recursive: true })
   await writeFile(configPath, '[]\n', { flag: 'wx' }).catch(error => {
@@ -80,10 +82,15 @@ export async function runPersonalGrowthHost(env: NodeJS.ProcessEnv = process.env
     workspaceRoot: isolated.workspace,
     agentsHome: isolated.agentsHome,
     runtimeRoot: join(isolated.root, 'runtime'),
+    admin: { port: adminPort },
   })
-  const dispose = (ctx as unknown as { dispose?: () => Promise<void> }).dispose
+  const bootContext = ctx as unknown as {
+    dispose?: () => Promise<void>
+    fiber?: { dispose?: () => Promise<void> }
+  }
+  const dispose = bootContext.dispose ?? bootContext.fiber?.dispose
   if (!dispose) throw new Error('DSH boot context does not expose public dispose()')
-  const shutdown = createIdempotentShutdown(() => dispose.call(ctx))
+  const shutdown = createIdempotentShutdown(() => dispose.call(bootContext.dispose ? ctx : bootContext.fiber))
   process.once('SIGINT', () => { void shutdown() })
   process.once('SIGTERM', () => { void shutdown() })
 }

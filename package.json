@@ -6,9 +6,12 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "architecture": "node scripts/serve-architecture.mjs",
     "test": "vitest run",
-    "typecheck": "tsc -b",
-    "build": "tsc -b",
+    "typecheck": "tsc -b && pnpm --filter @personal-growth/admin-web typecheck",
+    "build": "tsc -b && pnpm --filter @personal-growth/admin-web build",
+    "admin:token": "node packages/dsh-host/dist/admin/token-cli.js show",
+    "admin:token:rotate": "node packages/dsh-host/dist/admin/token-cli.js rotate",
     "lint": "eslint .",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "demo": "pnpm --filter @personal-growth/runtime build && node packages/runtime/dist/cli.js"

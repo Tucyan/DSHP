@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { assertLiveCredentials, runDemo } from '../src/cli.js';
+import { assertLiveCredentials, isDemoEntrypoint, runDemo } from '../src/cli.js';
 
 describe('credential-free demo', () => {
   it('returns a short auditable summary without credentials', async () => {
@@ -19,5 +19,10 @@ describe('credential-free demo', () => {
     expect(result).toMatch(/root=.*runtime/i);
     expect(result).toMatch(/traceCount=\d+/i);
     expect(result).not.toMatch(/QQBOT_SECRET|Remember my focused/i);
+  });
+
+  it('only runs the demo when the runtime cli module itself is the entrypoint', () => {
+    expect(isDemoEntrypoint('C:/repo/packages/dsh-host/dist/cli.js')).toBe(false);
+    expect(isDemoEntrypoint(undefined)).toBe(false);
   });
 });

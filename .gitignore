@@ -9,6 +9,8 @@ coverage/
 runtime/dsh-home/
 runtime/agents-home/
 runtime/credentials/
+runtime/admin/
+workspace/.personal-growth/
 workspace/data/
 workspace/memory/
 workspace/sessions/

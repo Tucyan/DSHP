@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
-import { buildHostPatch, assertRequiredComposition } from '../src/composition.js'
+import { buildHostPatch, assertRequiredComposition, hostModulePath } from '../src/composition.js'
 import * as publicApi from '../src/index.js'
 
 describe('DSH host composition contract', () => {
@@ -18,5 +18,9 @@ describe('DSH host composition contract', () => {
 
   it('does not publish the internal event-to-QQ observer factory', () => {
     expect('createVerifiedAgentObserver' in publicApi).toBe(false)
+  })
+
+  it('uses a file URL for the host module so the loader can import it on Windows', () => {
+    expect(hostModulePath()).toMatch(/^file:\/\//)
   })
 })
