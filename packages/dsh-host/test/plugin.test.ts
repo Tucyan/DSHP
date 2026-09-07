@@ -5,11 +5,20 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 describe('production DSH host adapter', () => {
+  it('requires the native shell tool on each platform', () => {
+    const common = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill']
+    expect(() => assertRequiredAgentTools([...common, 'bash'], 'linux')).not.toThrow()
+    expect(() => assertRequiredAgentTools([...common, 'bash'], 'darwin')).not.toThrow()
+    expect(() => assertRequiredAgentTools([...common, 'pwsh'], 'win32')).not.toThrow()
+    expect(() => assertRequiredAgentTools([...common, 'pwsh'], 'linux')).toThrow(/bash/)
+    expect(() => assertRequiredAgentTools([...common, 'bash'], 'win32')).toThrow(/pwsh/)
+    expect(() => assertRequiredAgentTools(common, 'linux')).toThrow(/bash/)
+  })
   it('fails closed when the public agent tool surface is incomplete', () => {
     expect(() => assertRequiredAgentTools(['read', 'write', 'edit'])).toThrow(/schedule_create/)
     expect(() => assertRequiredAgentTools([
       'schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal',
-      'read', 'write', 'edit', 'glob', 'grep', 'skill', 'pwsh',
+      'read', 'write', 'edit', 'glob', 'grep', 'skill', process.platform === 'win32' ? 'pwsh' : 'bash',
     ])).not.toThrow()
   })
 

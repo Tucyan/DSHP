@@ -284,7 +284,7 @@ export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
 export const REQUIRED_AGENT_TOOLS = [
   'schedule_create', 'schedule_list', 'schedule_delete',
   'get_goal', 'create_goal', 'update_goal',
-  'read', 'write', 'edit', 'glob', 'grep', 'skill', 'pwsh',
+  'read', 'write', 'edit', 'glob', 'grep', 'skill',
 ] as const
 
 /** Setup callback for the hidden maintenance root; restriction happens before publication. */
@@ -305,8 +305,9 @@ export function createReadOnlyHiddenAgentSetup(): (agentCtx: Context) => void {
   }
 }
 
-export function assertRequiredAgentTools(available: readonly string[]): void {
-  const missing = REQUIRED_AGENT_TOOLS.filter(name => !available.includes(name))
+export function assertRequiredAgentTools(available: readonly string[], platform: NodeJS.Platform = process.platform): void {
+  const required = [...REQUIRED_AGENT_TOOLS, platform === 'win32' ? 'pwsh' : 'bash']
+  const missing = required.filter(name => !available.includes(name))
   if (missing.length) throw new Error(`personal-growth-dsh-host missing required DSH tools: ${missing.join(', ')}`)
 }
 
