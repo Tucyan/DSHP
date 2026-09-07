@@ -22,6 +22,9 @@
 - Installed `/etc/dshp/dshp.env` as `0600 root:root` and `/etc/systemd/system/dshp.service` as `0644 root:root`; generated unit pins Node v24.20.0 and passed systemd verification with no DSHP-unit warning.
 - Reloaded systemd only. `dshp` intentionally remains inactive/disabled until credentials are populated; Nginx remains active.
 - Added a failing documentation regression for bare pnpm use, replaced all server commands with explicit Corepack invocations, then focused tests passed 3/3 and lint passed.
+- After credentials were populated, first systemd start failed in DSH plugin-tree loading; service was stopped to prevent a restart loop and Nginx stayed active.
+- Clean-environment recursive diagnostics found `ERR_MODULE_NOT_FOUND` for bare `@deepseek-ai/dsh-schedule` resolved from the isolated profile directory.
+- Added a failing Linux resolution regression (2 expected failures), implemented `scheduleModulePath()` using an absolute file URL, and restored composition tests to 5/5.
 
 ## Previous Web admin progress
 

@@ -15,14 +15,14 @@ export interface EntryRow { id: string; name: string; config?: Record<string, un
 export function buildHostPatch(options: HostPatchOptions = {}): { insert: EntryRow[] } {
   return {
     insert: [
-      { id: 'schedule', name: '@deepseek-ai/dsh-schedule' },
+      { id: 'schedule', name: scheduleModulePath() },
       { id: 'personal-growth-host', name: options.hostName ?? '@personal-growth/dsh-host', config: options.hostConfig },
     ],
   }
 }
 
 export function assertRequiredComposition(entries: readonly { id?: string; name?: string }[]): void {
-  if (!entries.some(entry => entry.id === 'schedule' && entry.name === '@deepseek-ai/dsh-schedule')) throw new Error('DSH host requires the public schedule plugin')
+  if (!entries.some(entry => entry.id === 'schedule' && entry.name === scheduleModulePath())) throw new Error('DSH host requires the public schedule plugin')
   if (!entries.some(entry => entry.id === 'personal-growth-host')) throw new Error('DSH host entry is missing')
 }
 
@@ -33,6 +33,11 @@ export function basePatchPath(): string {
 
 export function hostModulePath(): string {
   return pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), 'plugin.js')).href
+}
+
+export function scheduleModulePath(): string {
+  const require = createRequire(import.meta.url)
+  return pathToFileURL(require.resolve('@deepseek-ai/dsh-schedule')).href
 }
 
 export function loadBaseAndHostPatches(hostConfig: Record<string, unknown> = {}): unknown[] {

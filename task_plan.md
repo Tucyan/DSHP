@@ -8,7 +8,7 @@ Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server,
 - [x] Inspect server OS, memory, disk, Node tooling, current listeners, Nginx, and service manager without changing state.
 - [x] Add only deployment changes required for low-memory operation and private admin access; verify locally and push.
 - [x] Install or update the app on the server with bounded resource settings and a protected environment file.
-- [ ] Start under the available service manager and verify health, logs, reboot policy, Nginx continuity, and port exposure. (blocked only on user-populated credentials)
+- [ ] Start under the available service manager and verify health, logs, reboot policy, Nginx continuity, and port exposure. (credentials populated; Schedule module-resolution fix pending deployment)
 
 ## Deployment Decisions
 - Do not edit or reload Nginx unless inspection proves a change is required; the admin page must not take ports 80/443.
@@ -23,6 +23,7 @@ Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server,
 - `corepack prepare pnpm@11.7.0 --activate` cached pnpm but did not create a `pnpm` shim under NVM Node 24; the following install line failed immediately with `pnpm: command not found`, before dependency download. Use the explicit `corepack pnpm@11.7.0` invocation instead of repeating the failed command.
 - Server root build ran `tsc -b` successfully, then failed at the nested bare `pnpm --filter @personal-growth/admin-web build` because the shim is absent. Do not rerun the long root build; verify backend artifacts and run only the missing frontend sub-build once through explicit Corepack.
 - Deployment guide initially repeated the bare pnpm assumption. A failing documentation regression test caught it; examples now use explicit `corepack pnpm@11.7.0` and split backend/frontend builds.
+- First real systemd start exposed `ERR_MODULE_NOT_FOUND` for the Host overlay's bare Schedule package specifier. A clean diagnostic confirmed the profile-relative resolution root. TDD fix resolves Schedule to an absolute file URL like the Host module.
 
 # Previous completed work: Web admin implementation
 
