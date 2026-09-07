@@ -13,6 +13,15 @@
 - Added `.env.server.example`, `scripts/render-systemd.mjs`, and `docs/LINUX_DEPLOYMENT.md`; generated unit caps RAM/CPU/tasks and does not mention Nginx.
 - Full local `pnpm verify` passed: lint/typecheck/build plus 61 test files and 302 tests. `git diff --check` passed.
 - Found `.env.server.example` was ignored by `.env.*`; added a failing regression assertion, then `!.env.server.example`. Focused tests returned to 3/3 and lint passed.
+- Pushed deployment commit `c4bc63b`; installed Node v24.20.0 successfully from npmmirror and set NVM default to 24.
+- Cloned GitHub `main` at `c4bc63b` to `/opt/dshp`.
+- Dependency attempt did not start: Corepack prepared pnpm but no `pnpm` shim existed. Logged the exact error; next approach is the explicit cached `corepack pnpm@11.7.0` command.
+- Explicit Corepack pnpm check returned 11.7.0; actual dependency install then completed once in 24.9s (613 packages, native postinstalls succeeded).
+- Root production build completed backend `tsc -b` but failed when its nested frontend step called the absent bare `pnpm` shim. Memory remained about 919MB available and swap unused. Plan: verify backend dist and run only the missing frontend build once.
+- Verified backend Host CLI artifact, then ran only the previously missing admin frontend build; Vite production build passed and admin assets exist.
+- Installed `/etc/dshp/dshp.env` as `0600 root:root` and `/etc/systemd/system/dshp.service` as `0644 root:root`; generated unit pins Node v24.20.0 and passed systemd verification with no DSHP-unit warning.
+- Reloaded systemd only. `dshp` intentionally remains inactive/disabled until credentials are populated; Nginx remains active.
+- Added a failing documentation regression for bare pnpm use, replaced all server commands with explicit Corepack invocations, then focused tests passed 3/3 and lint passed.
 
 ## Previous Web admin progress
 

@@ -21,14 +21,15 @@ export NVM_DIR=/root/.nvm
 export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
 nvm install 24
 nvm use 24
-corepack enable
-corepack prepare pnpm@11.7.0 --activate
+export COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+corepack pnpm@11.7.0 --version
 
 git clone https://github.com/Tucyan/DSHP.git /opt/dshp
 cd /opt/dshp
-pnpm config set registry https://registry.npmmirror.com
-NODE_OPTIONS=--max-old-space-size=768 pnpm install --frozen-lockfile --child-concurrency=1 --network-concurrency=4
-NODE_OPTIONS=--max-old-space-size=768 pnpm build
+corepack pnpm@11.7.0 config set registry https://registry.npmmirror.com
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 install --frozen-lockfile --child-concurrency=1 --network-concurrency=4
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 exec tsc -b
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 --filter @personal-growth/admin-web build
 
 install -d -m 0700 /etc/dshp
 install -m 0600 .env.server.example /etc/dshp/dshp.env
@@ -57,7 +58,7 @@ Then open `http://127.0.0.1:3182`. On the server, obtain the generated login tok
 
 ```sh
 cd /opt/dshp
-PGA_REPO_ROOT=/opt/dshp pnpm admin:token
+PGA_REPO_ROOT=/opt/dshp corepack pnpm@11.7.0 admin:token
 ```
 
 ## Update
@@ -68,8 +69,9 @@ Stop the service before changing application files so runtime state stays consis
 systemctl stop dshp
 cd /opt/dshp
 git pull --ff-only
-NODE_OPTIONS=--max-old-space-size=768 pnpm install --frozen-lockfile --child-concurrency=1 --network-concurrency=4
-NODE_OPTIONS=--max-old-space-size=768 pnpm build
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 install --frozen-lockfile --child-concurrency=1 --network-concurrency=4
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 exec tsc -b
+NODE_OPTIONS=--max-old-space-size=768 corepack pnpm@11.7.0 --filter @personal-growth/admin-web build
 systemctl start dshp
 ```
 

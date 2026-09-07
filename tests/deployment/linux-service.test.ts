@@ -30,6 +30,7 @@ describe('Linux server deployment', () => {
   it('documents every required secret and keeps admin on loopback port 3182', () => {
     const template = readFileSync('.env.server.example', 'utf8')
     const gitignore = readFileSync('.gitignore', 'utf8')
+    const guide = readFileSync('docs/LINUX_DEPLOYMENT.md', 'utf8')
     expect(template).toContain('QQBOT_APP_ID=')
     expect(template).toContain('QQBOT_APP_SECRET=')
     expect(template).toContain('QQBOT_ALLOWED_PEER_ID=')
@@ -38,5 +39,7 @@ describe('Linux server deployment', () => {
     expect(template).toContain('DSH_PERMISSION_MODE=workspace-write')
     expect(template).not.toMatch(/replace-with|provided-at-process/i)
     expect(gitignore).toContain('!.env.server.example')
+    expect(guide).toContain('corepack pnpm@11.7.0')
+    expect(guide).not.toMatch(/^pnpm /mu)
   })
 })
