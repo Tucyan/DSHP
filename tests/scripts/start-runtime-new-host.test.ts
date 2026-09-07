@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import path from 'node:path'
+import { resolvePowerShell } from './powershell.js'
 
 describe('new host runtime launcher', () => {
   it('dry-runs live QQ with the built host and no legacy web profile', () => {
-    const result = execFileSync('pwsh', [
+    const result = execFileSync(resolvePowerShell(), [
       '-NoProfile', '-File', path.resolve('scripts/start-runtime.ps1'), '-DryRun', '-LiveQQ', '-PeerId', '12345',
     ], { encoding: 'utf8', env: { ...process.env, QQ_PEER_ID: '' } })
     const launch = JSON.parse(result) as { command: string; args: string[]; cwd: string; env: Record<string, string> }

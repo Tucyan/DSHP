@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { resolvePowerShell } from './powershell.js';
 
 describe('runtime launcher isolation', () => {
   it('computes repository-local paths in dry-run mode without creating files', () => {
@@ -16,7 +17,7 @@ describe('runtime launcher isolation', () => {
   });
   it('captures the real PowerShell dry-run command, cwd, full isolated env and args', () => {
     const script = path.resolve('scripts/start-runtime.ps1');
-    const result = execFileSync('pwsh', ['-NoProfile', '-File', script, '-DryRun'], { encoding: 'utf8', env: { ...process.env, PGA_REPO_ROOT: process.cwd() } });
+    const result = execFileSync(resolvePowerShell(), ['-NoProfile', '-File', script, '-DryRun'], { encoding: 'utf8', env: { ...process.env, PGA_REPO_ROOT: process.cwd() } });
     const launch = JSON.parse(result) as { command: string; cwd: string; args: string[]; env: Record<string, string> };
     expect(launch.command).toBe('corepack');
     expect(launch.cwd).toBe(path.resolve('workspace'));
