@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
-import { buildHostPatch, assertRequiredComposition, hostModulePath, scheduleModulePath } from '../src/composition.js'
+import { buildHostPatch, assertRequiredComposition, hostModulePath, loadBaseAndHostPatches, scheduleModulePath } from '../src/composition.js'
 import * as publicApi from '../src/index.js'
 
 describe('DSH host composition contract', () => {
@@ -31,5 +31,11 @@ describe('DSH host composition contract', () => {
       { id: 'schedule', name },
       { id: 'personal-growth-host', name: hostModulePath() },
     ])).not.toThrow()
+  })
+
+  it('resolves every base plugin to a file URL outside the isolated profile', () => {
+    const [base] = loadBaseAndHostPatches() as Array<{ insert: Array<{ id: string; name: string }> }>
+    expect(base.insert.find(entry => entry.id === 'llm-deepseek')?.name).toMatch(/^file:\/\//)
+    expect(base.insert.every(entry => entry.name.startsWith('file://'))).toBe(true)
   })
 })

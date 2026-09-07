@@ -40,8 +40,25 @@ export function scheduleModulePath(): string {
   return pathToFileURL(require.resolve('@deepseek-ai/dsh-schedule')).href
 }
 
+function resolveBasePatchModules(patches: unknown[]): unknown[] {
+  const require = createRequire(basePatchPath())
+  return patches.map(patch => {
+    if (!patch || typeof patch !== 'object') return patch
+    const insert = (patch as { insert?: unknown }).insert
+    if (!Array.isArray(insert)) return patch
+    return {
+      ...patch,
+      insert: insert.map(entry => {
+        if (!entry || typeof entry !== 'object' || typeof (entry as { name?: unknown }).name !== 'string') return entry
+        const name = (entry as { name: string }).name
+        return { ...entry, name: name.startsWith('file:') ? name : pathToFileURL(require.resolve(name)).href }
+      }),
+    }
+  })
+}
+
 export function loadBaseAndHostPatches(hostConfig: Record<string, unknown> = {}): unknown[] {
-  const base = loadOverlayPatches('personal-growth', basePatchPath())
+  const base = resolveBasePatchModules(loadOverlayPatches('personal-growth', basePatchPath()))
   return [...base, buildHostPatch({ hostName: hostModulePath(), hostConfig })]
 }
 
