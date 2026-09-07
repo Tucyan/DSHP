@@ -1,4 +1,27 @@
-# Web admin implementation
+# Low-resource server deployment
+
+## Goal
+Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server, preserve the existing Nginx service, keep the admin listener private, and leave a documented environment file for the user to populate.
+
+## Active Phases
+- [x] Audit local runtime requirements, ports, environment variables, and production entrypoint.
+- [x] Inspect server OS, memory, disk, Node tooling, current listeners, Nginx, and service manager without changing state.
+- [ ] Add only deployment changes required for low-memory operation and private admin access; verify locally and push. (full verification passed; commit/push pending)
+- [ ] Install or update the app on the server with bounded resource settings and a protected environment file.
+- [ ] Start under the available service manager and verify health, logs, reboot policy, Nginx continuity, and port exposure.
+
+## Deployment Decisions
+- Do not edit or reload Nginx unless inspection proves a change is required; the admin page must not take ports 80/443.
+- Bind the admin HTTP server to loopback and access it through an SSH tunnel unless the user later requests a dedicated Nginx route.
+- Build serially and cap Node memory for a 2GB host; avoid running the test suite on the server.
+- Create the environment file with placeholders and restrictive permissions; never invent or request secrets in chat.
+
+## Deployment Errors
+
+- Server had Node 18 only; resolved deployment design by using existing NVM with the npmmirror Node mirror. Installation is pending.
+- Initial deployment contract test failed as intended because the renderer and environment template did not exist; minimal implementation now passes 3/3 focused tests.
+
+# Previous completed work: Web admin implementation
 
 ## Goal
 Implement the approved localhost, token-protected real Host administration UI: status, read-only sessions, controlled Memory CRUD/archive, SOUL/Mission editing, Heartbeat, Schedule, diagnostic and extension viewing.

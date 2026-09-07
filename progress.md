@@ -1,5 +1,21 @@
 # Web admin progress
 
+## Server deployment - 2026-09-07
+- Began deployment audit for the 2-core/2GB Alibaba Cloud server.
+- Confirmed user will populate the environment file; credentials will not be read or written by the agent.
+- Chosen safety baseline: preserve Nginx, keep admin on loopback, inspect before mutating, and use bounded build/runtime memory.
+- Read-only server audit completed: Ubuntu 22.04, 2 CPU, 1.6GB RAM plus 4GB swap, 16GB disk free; Nginx active/config valid; port 3182 free.
+- Found Node 18.20.8 and no active pnpm, below the repository's Node >=24 requirement. Next: inspect NVM and model configuration before writing deployment assets.
+- Confirmed NVM 0.40.3 is installed with only Node 18.
+- Identified and stopped `yuncang-frontend`, `yuncang-backend`, and `yuncang-mysql`; no containers or data were removed.
+- Post-stop verification: available RAM about 936MB, swap unused, old ports released, Nginx active and syntax valid. Server capacity is now adequate with low-memory deployment limits.
+- Added test-first Linux deployment contracts. RED: missing renderer/template caused 2 expected failures; GREEN: 3/3 focused tests pass.
+- Added `.env.server.example`, `scripts/render-systemd.mjs`, and `docs/LINUX_DEPLOYMENT.md`; generated unit caps RAM/CPU/tasks and does not mention Nginx.
+- Full local `pnpm verify` passed: lint/typecheck/build plus 61 test files and 302 tests. `git diff --check` passed.
+- Found `.env.server.example` was ignored by `.env.*`; added a failing regression assertion, then `!.env.server.example`. Focused tests returned to 3/3 and lint passed.
+
+## Previous Web admin progress
+
 ## 2026-09-07
 - Approved plan accepted; inspected pinned SDK and real Host code.
 - Baseline direct Vitest: 54 files / 269 tests passed (14.99s).
