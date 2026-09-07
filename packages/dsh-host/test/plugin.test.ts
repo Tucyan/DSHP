@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, assertRequiredAgentTools, createDshAgentRegistry, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
+import { apply, assertRequiredAgentTools, createDshAgentRegistry, isCanonicalPathWithin, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
 import { join, resolve } from 'node:path'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -73,6 +73,22 @@ describe('production DSH host adapter', () => {
     expect(() => normalizeHostPaths({ workspaceRoot: resolve('other', 'workspace'), runtimeRoot: join(root, 'runtime'), agentsHome: join(root, 'runtime', 'agents-home') }, { USERPROFILE: resolve('unrelated-user') })).toThrow(/project isolated/)
     const home = resolve('isolated-user')
     expect(() => normalizeHostPaths({ workspaceRoot: join(home, '.dsh', 'workspace'), runtimeRoot: join(home, '.dsh', 'runtime'), agentsHome: join(home, '.dsh', 'runtime', 'agents-home') }, { USERPROFILE: home })).toThrow(/default home/)
+  })
+
+  it('recognizes POSIX descendants without accepting sibling prefixes', () => {
+    expect(isCanonicalPathWithin('/opt/dshp', '/opt/dshp/runtime', '/')).toBe(true)
+    expect(isCanonicalPathWithin('/opt/dshp', '/opt/dshp-other/runtime', '/')).toBe(false)
+  })
+
+  it('preserves POSIX case boundaries and supports filesystem roots', () => {
+    expect(isCanonicalPathWithin('/opt/dshp', '/opt/DSHP/runtime', '/')).toBe(false)
+    expect(isCanonicalPathWithin('/', '/opt/dshp', '/')).toBe(true)
+    expect(isCanonicalPathWithin('/opt/dshp', '/opt/dshp', '/')).toBe(true)
+  })
+
+  it('retains case-insensitive Windows path boundaries', () => {
+    expect(isCanonicalPathWithin('C:\\DSHP', 'c:\\dshp\\runtime', '\\')).toBe(true)
+    expect(isCanonicalPathWithin('C:\\DSHP', 'c:\\dshp-other\\runtime', '\\')).toBe(false)
   })
 
   it('rejects dangerous apply configuration synchronously before creating host state', async () => {

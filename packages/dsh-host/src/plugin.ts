@@ -6,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
-import { dirname, resolve } from 'node:path'
+import { dirname, resolve, sep } from 'node:path'
 import { lstatSync, realpathSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -73,11 +73,18 @@ function nearestExistingSync(value: string): string {
   }
 }
 
+export function isCanonicalPathWithin(root: string, target: string, separator = sep): boolean {
+  const normalizedRoot = separator === '\\' ? root.toLowerCase() : root
+  const normalizedTarget = separator === '\\' ? target.toLowerCase() : target
+  const prefix = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(prefix)
+}
+
 function assertCanonicalHostPaths(paths: IsolatedPaths): void {
-  const root = nearestExistingSync(paths.root).toLowerCase()
+  const root = nearestExistingSync(paths.root)
   for (const target of [paths.root, paths.dshHome, paths.agentsHome, paths.workspace, paths.plugins, paths.skills, paths.sessions, paths.storage, paths.credentials]) {
-    const canonical = nearestExistingSync(target).toLowerCase()
-    if (canonical !== root && !canonical.startsWith(`${root}\\`)) throw new Error('isolated path resolves outside repository')
+    const canonical = nearestExistingSync(target)
+    if (!isCanonicalPathWithin(root, canonical)) throw new Error('isolated path resolves outside repository')
     let current = resolve(target)
     while (current.toLowerCase() !== resolve(paths.root).toLowerCase()) {
       try { if (lstatSync(current).isSymbolicLink()) throw new Error('isolated host paths may not contain symlinks or junctions') }
@@ -99,11 +106,7 @@ export function normalizeHostPaths(config: Pick<DshHostConfig, 'workspaceRoot' |
   const agentsHome = resolve(config.agentsHome ?? resolve(runtimeRoot, 'agents-home'))
   const isolated = resolveIsolatedPaths(repoRoot)
   const defaults = [env.USERPROFILE, env.HOME].filter((value): value is string => Boolean(value)).flatMap(home => [resolve(home, '.dsh'), resolve(home, '.agents')])
-  if ([repoRoot, workspaceRoot, runtimeRoot, agentsHome].some(candidate => defaults.some(item => {
-    const normalizedCandidate = candidate.toLowerCase()
-    const normalizedItem = item.toLowerCase()
-    return normalizedCandidate === normalizedItem || normalizedCandidate.startsWith(`${normalizedItem}\\`)
-  }))) throw new Error('isolated host path must not equal or be inside the default home')
+  if ([repoRoot, workspaceRoot, runtimeRoot, agentsHome].some(candidate => defaults.some(item => isCanonicalPathWithin(item, candidate)))) throw new Error('isolated host path must not equal or be inside the default home')
   if (workspaceRoot !== isolated.workspace || runtimeRoot !== resolve(repoRoot, 'runtime') || agentsHome !== isolated.agentsHome) throw new Error('host paths must use the project isolated workspace and runtime roots')
   validateIsolatedPaths(isolated)
   assertCanonicalHostPaths(isolated)
