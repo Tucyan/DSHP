@@ -11,7 +11,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { AgentActionSchema, assertActionAllowedForTrigger, type AgentAction, type AgentTrigger, appendJsonl, readJsonl, redactTrace } from '@personal-growth/shared'
+import { type AgentAction, type AgentTrigger, appendJsonl, readJsonl, redactTrace } from '@personal-growth/shared'
 import { HeartbeatService, parseHeartbeatConfig, type HeartbeatConfig } from '@personal-growth/personal-heartbeat'
 import { DreamService, HistoryRecordSchema, ProposalSchema } from '@personal-growth/personal-memory'
 import { ExtensionWriter } from '@personal-growth/runtime'
@@ -22,6 +22,8 @@ import { HeartbeatController } from './admin/heartbeat.js'
 import { AdminBackend, HostStatus } from './admin/backend.js'
 import { installManagedPrompt, adminSessions, adminSchedule } from './admin/integration.js'
 import { startAdminServer } from './admin/server.js'
+import { requestHiddenAction } from './hidden-action.js'
+export { parseAgentActionJson } from './hidden-action.js'
 
 export const name = 'personal-growth-dsh-host'
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'tools']
@@ -126,15 +128,6 @@ export interface DshAgentOptions {
 export interface CompletedTurn {
   text: string
   seq: number
-}
-
-/** Strictly parse model output; markdown wrappers and unknown fields are rejected. */
-export function parseAgentActionJson(raw: string): AgentAction {
-  if (typeof raw !== 'string' || !raw.trim()) throw new Error('Hidden agent returned empty action')
-  const input: unknown = JSON.parse(raw)
-  const parsed = AgentActionSchema.parse(input)
-  if (!input || typeof input !== 'object' || Object.keys(input).length !== Object.keys(parsed).length || Object.keys(input).some(key => !Object.prototype.hasOwnProperty.call(parsed, key))) throw new Error('Hidden agent returned non-strict action JSON')
-  return parsed
 }
 
 export function buildHeartbeatConfig(env: Record<string, string | undefined> = process.env): HeartbeatConfig {
@@ -289,19 +282,18 @@ export const REQUIRED_AGENT_TOOLS = [
 
 /** Setup callback for the hidden maintenance root; restriction happens before publication. */
 export function createBackgroundAgentSetup(): (agentCtx: Context) => void {
-  return (agentCtx: Context) => {
-    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
-    if (!tools?.restrict) throw new Error('personal-growth-dsh-host requires public tool restriction for background agent')
-    tools.restrict({ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] })
-  }
+  // Maintenance proposes an action; only the Host executes validated effects.
+  return createReadOnlyHiddenAgentSetup()
 }
 
 /** Decision and Dream agents receive only the read-only skill catalog. */
 export function createReadOnlyHiddenAgentSetup(): (agentCtx: Context) => void {
   return (agentCtx: Context) => {
-    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
-    if (!tools?.restrict) throw new Error('personal-growth-dsh-host requires tool restriction for read-only hidden agent')
+    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown; guard?: (check: (execution: { name: string }) => string | undefined) => unknown } }).tools
+    if (!tools?.restrict || !tools.guard) throw new Error('personal-growth-dsh-host requires tool restriction and guard for read-only hidden agent')
     tools.restrict({ allow: ['skill'] })
+    // Scoped DSH schedule tools survive global restrictions; deny their execution too.
+    tools.guard(execution => execution.name === 'skill' ? undefined : 'hidden_agent_read_only')
   }
 }
 
@@ -373,6 +365,7 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
     },
     followup(message) {
       tracker?.begin(String(agent.id), message.messageId)
+      wrapped.reply = undefined
       agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'user' } }))
     },
     whenIdle: async () => {
@@ -581,8 +574,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
           if (candidate) return { type: 'MESSAGE_USER', text: candidate.text, importance: 'normal' }
           const profile = await memory.readProfile()
           const relevant = await memory.search('recent goals progress follow-up', 8)
-          const raw = await hiddenText('decision', `${INTERNAL_PROMPTS.decision}PROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}\n触发:${trigger.occurrenceId}`)
-          return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
+          return requestHiddenAction('decision', trigger, `${INTERNAL_PROMPTS.decision}PROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}\n触发:${trigger.occurrenceId}`, prompt => hiddenText('decision', prompt))
         }
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
@@ -633,8 +625,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
             await renewalInFlight?.catch(() => undefined)
           }
         }
-        const raw = await hiddenText('maintenance', `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`)
-        return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
+        return requestHiddenAction('maintenance', trigger, `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`, prompt => hiddenText('maintenance', prompt))
       },
     },
     sink: { append: async record => { await appendTrace({ type: 'heartbeat_decision', ...record }) } },

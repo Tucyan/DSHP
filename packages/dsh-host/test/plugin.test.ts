@@ -66,14 +66,30 @@ describe('production DSH host adapter', () => {
 
   it('restricts the hidden maintenance agent at unpublished setup time', () => {
     const calls: unknown[] = []
-    createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
-    expect(calls).toEqual([{ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] }])
+    let guard!: (execution: { name: string }) => string | undefined
+    createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined }, guard(value: typeof guard) { guard = value } } } as never)
+    expect(calls).toEqual([{ allow: ['skill'] }])
+    expect(guard({ name: 'skill' })).toBeUndefined()
+    for (const name of ['personal_skill_create', 'personal_memory_apply', 'schedule_create', 'write']) expect(guard({ name })).toBeTruthy()
   })
 
   it('restricts decision and Dream agents to read-only skill lookup', () => {
     const calls: unknown[] = []
-    createReadOnlyHiddenAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
+    createReadOnlyHiddenAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined }, guard() {} } } as never)
     expect(calls).toEqual([{ allow: ['skill'] }])
+  })
+
+  it('clears previous reply before beginning another hidden turn', async () => {
+    const registry = createDshAgentRegistry({
+      sessionPersistence: { listSnapshots: async () => [] },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+      agents: { create: async () => ({ agent: { id: 'test', followup() {}, async whenIdle() {} }, async dispose() {} }) },
+    } as never)
+    const agent = await registry.create({ sessionId: 'test' })
+    agent.reply = '{"type":"NOOP","reason":"previous turn"}'
+    agent.followup({ text: 'next turn', source: 'heartbeat' })
+    await agent.whenIdle()
+    expect(agent.reply).toBeUndefined()
   })
 
   it('normalizes only the project workspace/runtime layout and rejects home defaults', () => {

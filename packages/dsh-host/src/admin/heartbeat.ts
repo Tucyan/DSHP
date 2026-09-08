@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { z } from 'zod'
 import { HeartbeatConfigSchema, type HeartbeatConfig } from '@personal-growth/personal-heartbeat'
 import { AdminError, SafeAdminFiles, redactAdmin } from './files.js'
+import { HiddenActionError } from '../hidden-action.js'
 
 export const AdminHeartbeatSettingsSchema = z.object({
   policy: HeartbeatConfigSchema,
@@ -59,7 +60,7 @@ export class HeartbeatController {
     if (this.pending.has(role)) throw new AdminError(409, 'heartbeat_busy')
     const job: Job = { id: `admin-${randomUUID()}`, role, requestId, status: 'running', startedAt: new Date().toISOString() }
     this.records.push(job); if (this.records.length > 200) this.records.splice(0, this.records.length - 200)
-    const task = Promise.resolve().then(() => this.execute!(role, job.id)).then(result => { job.result = redactAdmin(result); job.status = 'completed' }, () => { job.error = 'heartbeat_failed'; job.status = 'failed' }).finally(() => { job.endedAt = new Date().toISOString(); this.pending.delete(role) })
+    const task = Promise.resolve().then(() => this.execute!(role, job.id)).then(result => { job.result = redactAdmin(result); job.status = 'completed' }, error => { job.error = error instanceof HiddenActionError ? error.code : 'heartbeat_failed'; job.status = 'failed' }).finally(() => { job.endedAt = new Date().toISOString(); this.pending.delete(role) })
     this.pending.set(role, task); return structuredClone(job)
   }
   async drain() { await Promise.allSettled([...this.pending.values()]) }
