@@ -134,9 +134,15 @@ export class MemoryService {
       if (historyEvidence) {
         const historyRevisions = revisionLedger.records.filter((revision) => revision.source.includes(historyEvidence));
         const proposalEvidence = proposal.sourceEvidence.find((evidence) => evidence.startsWith('proposal:'));
+        const batchEvidence = proposal.sourceEvidence.find((evidence) => evidence.startsWith('batch:'));
+        if (batchEvidence) {
+          const original = ProposalSchema.parse({ ...proposal, sourceEvidence: proposal.sourceEvidence.filter(evidence => !/^(history|proposal|batch):/.test(evidence)) });
+          const fingerprint = createHash('sha256').update(JSON.stringify(original)).digest('hex');
+          if (!/^batch:[a-f0-9]{64}$/.test(batchEvidence) || proposalEvidence !== `proposal:${fingerprint}` || ['history:', 'proposal:', 'batch:'].some(prefix => proposal.sourceEvidence.filter(item => item.startsWith(prefix)).length !== 1)) throw new Error('Invalid memory batch identity');
+        }
         const existing = historyRevisions.find((revision) => revision.action === proposal.action && (revision.path === expectedPath || revision.path === proposal.path) && (!proposalEvidence ? !revision.source.some((evidence) => evidence.startsWith('proposal:')) : revision.source.includes(proposalEvidence)));
         if (existing) return { accepted: true, action: proposal.action, path: existing.path, revision: existing, trace: { result: 'already-applied' } };
-        if (historyRevisions.length) throw new Error(`Conflicting memory proposal for ${historyEvidence}`);
+        if (historyRevisions.length && (!batchEvidence || historyRevisions.some(revision => !revision.source.includes(batchEvidence) || revision.path.toLowerCase() === proposal.path.toLowerCase() || revision.path.toLowerCase() === expectedPath.toLowerCase()))) throw new Error(`Conflicting memory proposal for ${historyEvidence}`);
       }
     }
     if (proposal.action === 'IGNORE') return { accepted: true, action: 'IGNORE', path: proposal.path, trace: { result: 'ignored', reason: proposal.reason } };

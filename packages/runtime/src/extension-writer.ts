@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { appendJsonl, redactTrace } from '@personal-growth/shared';
 
 export interface SkillDraft { name: string; description: string; instructions: string; positiveTriggers: string[]; negativeTriggers: string[]; }
+export interface SkillDraftInput { name: string; description?: string; instructions: string; }
 export interface SkillResult { path: string; version: number; created: boolean; }
 export interface PluginProposal { name: string; capabilityGap: string; design: string; tests?: string[]; }
 export interface PluginProposalResult { path: string; version: number; }
@@ -41,6 +42,19 @@ export function validateSkillDraft(input: SkillDraft): SkillDraft {
   if (!input.instructions.includes('Input:') || !input.instructions.includes('Output:') || !input.instructions.includes('Stop')) throw new Error('skill requires explicit Input, Output, and Stop behavior');
   if (!input.positiveTriggers.length || !input.negativeTriggers.length) throw new Error('skill requires positive and negative triggers');
   return { ...input, description: input.description.trim(), instructions: input.instructions.trim() };
+}
+
+/** Build and validate the bounded draft used by Host skill actions. */
+export function buildSkillDraft(input: SkillDraftInput): SkillDraft {
+  if (!input.instructions.trim()) throw new Error('skill instructions are required');
+  const description = input.description?.trim() || `Use when the user explicitly requests the ${input.name} workflow.`;
+  return validateSkillDraft({
+    name: input.name,
+    description,
+    instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${input.instructions.trim()}\n\nStop:\nStop when the requested skill action is complete.`,
+    positiveTriggers: [input.name],
+    negativeTriggers: ['unrelated request'],
+  });
 }
 function skillText(input: SkillDraft): string { return `---\nname: ${input.name}\ndescription: ${input.description}\n---\n\n# ${input.name}\n\n${input.instructions}\n\n## Trigger boundaries\n\nPositive triggers: ${input.positiveTriggers.join('; ')}\nNegative triggers: ${input.negativeTriggers.join('; ')}\n`; }
 function proposalText(input: PluginProposal, version: number): string { return `# Plugin proposal: ${input.name} v${version}\n\nStatus: PROPOSED; requires human approval.\n\n## Capability gap\n${input.capabilityGap}\n\n## Design\n${input.design}\n\n## Tests\n${(input.tests ?? []).map((item) => `- ${item}`).join('\n') || '- Add contract, failure, and integration tests before activation.'}\n`; }

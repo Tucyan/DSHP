@@ -23,6 +23,9 @@ import { AdminBackend, HostStatus } from './admin/backend.js'
 import { installManagedPrompt, adminSessions, adminSchedule } from './admin/integration.js'
 import { startAdminServer } from './admin/server.js'
 import { requestHiddenAction } from './hidden-action.js'
+import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
+import { executeSkillAction } from './skill-action.js'
+import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
 export { parseAgentActionJson } from './hidden-action.js'
 
 export const name = 'personal-growth-dsh-host'
@@ -175,21 +178,6 @@ function inside(root: string, child: string): string {
   return target
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map(key => [key, canonicalize((value as Record<string, unknown>)[key])]))
-  }
-  return value
-}
-
-function addHistoryEvidence(historyId: string, proposal: unknown): unknown {
-  const parsed = ProposalSchema.parse(proposal)
-  if (parsed.sourceEvidence.some(evidence => evidence.startsWith('history:') || evidence.startsWith('proposal:'))) throw new Error('Dream proposal contains reserved history/proposal evidence')
-  const fingerprint = createHash('sha256').update(JSON.stringify(canonicalize(parsed)), 'utf8').digest('hex')
-  return ProposalSchema.parse({ ...parsed, sourceEvidence: [...new Set([...parsed.sourceEvidence, `history:${historyId}`, `proposal:${fingerprint}`])] })
-}
-
 function scheduleOccurrenceId(sessionId: string, turn: number): string {
   return `schedule-${createHash('sha256').update(sessionId, 'utf8').digest('hex').slice(0, 24)}-${turn}`
 }
@@ -215,7 +203,7 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       await paths.ready
       const slug = safeSlug(args.name)
       if (paths.extensionWriter) {
-        const result = await paths.extensionWriter.createSkill({ name: slug, description: `Use when working on ${slug}.`, instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${args.instructions}\n\nStop:\nStop when the requested skill action is complete.`, positiveTriggers: [slug], negativeTriggers: ['unrelated request'] })
+        const result = await executeSkillAction(paths.extensionWriter, { name: slug, description: args.description, instructions: args.instructions })
         return { accepted: true, path: result.path }
       }
       const target = inside(paths.agentsHome, `${paths.agentsHome}/skills/${slug}/SKILL.md`)
@@ -472,7 +460,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   const memory: BridgeMemory = config.memory ?? {
     readProfile: () => service.readProfile(),
-    search: async (query, limit) => (await service.search(query, limit)).map(document => document.raw),
+    search: async (query, limit) => (await service.search(query, limit)).map(document => `PATH:${document.path}\nHASH:${document.hash}\n${document.raw}`),
     consume: events => service.consume(events),
     readIndex: () => service.readIndex(),
     apply: proposal => service.apply(proposal as Parameters<MemoryService['apply']>[0]),
@@ -536,13 +524,14 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   }
   const dreamService = new DreamService({
     propose: async input => {
-      const raw = await hiddenText('dream', `${INTERNAL_PROMPTS.dream} IGNORE示例: [${JSON.stringify({ action: 'IGNORE', reason: 'no reliable change', sourceEvidence: ['dream:no-change'] })}]。HISTORY:\n${JSON.stringify(input.newHistory)}\nPROFILE:\n${input.profile}\nINDEX:\n${input.index}\nRELEVANT MEMORY:\n${input.relevantMemories.join('\n')}`)
+      const raw = await hiddenText('dream', `${INTERNAL_PROMPTS.dream}\n${DREAM_PROPOSAL_CONTRACT}\nHISTORY:\n${JSON.stringify(input.newHistory)}\nPROFILE:\n${input.profile}\nINDEX:\n${input.index}\nRELEVANT MEMORY:\n${input.relevantMemories.join('\n')}`)
       const parsed = JSON.parse(raw)
       if (!Array.isArray(parsed)) throw new Error('hidden dream agent must return a JSON proposal array')
       return parsed
     },
   })
   const dreamAdapter: BridgeDream = dream ?? { propose: input => dreamService.dream(input) }
+  const dreamBatches = new DreamBatchStore(workspaceRoot)
   const consumeDurableMemoryTurn = async (key: string, sessionId: string, initial: ConversationEvent[]): Promise<void> => {
     let events = initial
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -572,20 +561,44 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         if (trigger.type === 'foreground_heartbeat') {
           const candidate = scheduleCandidates.get(trigger.occurrenceId)
           if (candidate) return { type: 'MESSAGE_USER', text: candidate.text, importance: 'normal' }
-          const profile = await memory.readProfile()
-          const relevant = await memory.search('recent goals progress follow-up', 8)
-          return requestHiddenAction('decision', trigger, `${INTERNAL_PROMPTS.decision}PROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}\n触发:${trigger.occurrenceId}`, prompt => hiddenText('decision', prompt))
+          const sessionId = sessionIdForPeer(allowedPeerId)
+          const context = await buildHeartbeatContext({
+            identity: async () => {
+              if (adminEnabled) { const value = prompts.view(); return { soul: value.soul.text, mission: value.mission.text } }
+              return { soul: await adminFiles.read('workspace/SOUL.md'), mission: await adminFiles.read('workspace/AGENT.md') }
+            },
+            profile: () => memory.readProfile(),
+            memories: () => memory.search('recent goals progress follow-up', 8),
+            recent: async () => {
+              const exists = (await ctx.sessionPersistence.listSnapshots()).some(item => String(item.header.id) === sessionId)
+              if (!exists) return []
+              return recentUserConversation((await ctx.sessionPersistence.inspect(SessionId(sessionId))).events)
+            },
+            goal: async () => {
+              if (!bridge) throw new Error('foreground_unavailable')
+              await bridge.ensureForeground()
+              const agent = ctx.agents.get(SessionId(sessionId))
+              const goals = (ctx as unknown as { goals?: { get(agent: Agent): unknown } }).goals
+              if (!agent || !goals) throw new Error('goal_unavailable')
+              return goals.get(agent) ?? null
+            },
+            schedules: async () => await adminSchedule(ctx, sessionId, async () => undefined)('list', {}) as unknown[],
+            lastContact: async () => (await heartbeatService.ledger.read()).contacts.map(item => item.at).sort().at(-1) ?? null,
+          }, { at: trigger.at, timeZone: heartbeatService.config.timeZone, triggerId: trigger.occurrenceId })
+          await appendTrace({ type: 'heartbeat', at: trigger.at, key: trigger.occurrenceId, status: context.ready ? 'context_ready' : 'context_unavailable', reason: context.sources.filter(item => item.status !== 'available').map(item => item.name).join(',') || (context.truncated ? 'context_truncated' : 'context_complete') })
+          if (!context.ready) return { type: 'NOOP', reason: '必要上下文暂不可用，本轮不主动联系' }
+          return requestHiddenAction('decision', trigger, `${INTERNAL_PROMPTS.decision}\n${context.prompt}`, prompt => hiddenText('decision', prompt))
         }
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
         const pending = []
-        const maintenanceProfile = await memory.readProfile()
-        const maintenanceIndex = await memory.readIndex()
-        const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
+        let failures = 0
+        let processed = 0
         for (const record of historyResult.records) {
           const claimed = await bridgeState.claimHistory?.(record.id) ?? true
           await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: claimed ? 'claimed' : 'already-claimed' })
           if (!claimed) continue
+          if (processed++ >= 10) { await bridgeState.failHistory(record.id); break }
           let lost = false
           let renewalInFlight: Promise<void> | undefined
           const renew = () => {
@@ -600,31 +613,33 @@ export function apply(ctx: Context, config: DshHostConfig): void {
           }
           const renewal = setInterval(renew, 10_000)
           try {
-            const proposals = await dreamAdapter.propose({ newHistory: [record], profile: maintenanceProfile, index: maintenanceIndex, relevantMemories: maintenanceRelevant })
-            if (lost) throw new Error('history lease lost during dream')
-            const parsedProposals = proposals.map(proposal => ProposalSchema.parse(proposal))
-            const mutations = parsedProposals.filter(proposal => proposal.action !== 'IGNORE')
-            if (mutations.length > 1) throw new Error(`Dream returned multiple mutations for history ${record.id}`)
-            const selected = mutations[0] ?? parsedProposals[0]
-            await appendTrace({ type: 'dream_proposal', at: new Date().toISOString(), key: record.id, status: selected ? 'received' : 'empty' })
-            if (selected) {
-              const withEvidence = addHistoryEvidence(record.id, selected)
-              await memory.apply(withEvidence)
+            await dreamBatches.run(record.id, async () => {
+              const proposals = await dreamAdapter.propose({ newHistory: [record], profile: await memory.readProfile(), index: await memory.readIndex(), relevantMemories: await memory.search(record.summary.slice(0, 500), 8) })
+              if (lost) throw new Error('history lease lost during dream')
+              await appendTrace({ type: 'dream_proposal', at: new Date().toISOString(), key: record.id, status: 'received' })
+              return proposals
+            }, async proposal => {
+              if (lost) throw new Error('history lease lost before memory apply')
+              await memory.apply(proposal)
               if (lost) throw new Error('history lease lost during memory apply')
               await appendTrace({ type: 'memory_apply', at: new Date().toISOString(), key: record.id, status: 'completed' })
-            }
+            })
             await bridgeState.completeHistory?.(record.id)
             await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'completed' })
             pending.push(record)
-          } catch (error) {
+          } catch {
             await bridgeState.failHistory?.(record.id)
             await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'failed' })
-            throw error
+            failures++
           } finally {
             clearInterval(renewal)
             await renewalInFlight?.catch(() => undefined)
           }
         }
+        if (failures) throw new Error('heartbeat_memory_batch_failed')
+        const maintenanceProfile = await memory.readProfile()
+        const maintenanceIndex = await memory.readIndex()
+        const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
         return requestHiddenAction('maintenance', trigger, `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`, prompt => hiddenText('maintenance', prompt))
       },
     },
@@ -654,8 +669,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       const result = await heartbeatService.wakeBackground({ occurrenceId: input.occurrenceId, at: input.at })
       const action = result.action
       if (action?.type === 'CREATE_SKILL') {
-        const slug = safeSlug(action.name)
-        await extensionWriter.createSkill({ name: slug, description: `Use when working on ${slug}.`, instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${action.instructions}\n\nStop:\nStop when the requested skill action is complete.`, positiveTriggers: [slug], negativeTriggers: ['unrelated request'] })
+        await executeSkillAction(extensionWriter, { ...action, name: safeSlug(action.name) })
       } else if (action?.type === 'PROPOSE_PLUGIN') {
         await extensionWriter.proposePlugin({ name: safeSlug(action.name), capabilityGap: action.capabilityGap, design: action.design })
       }
