@@ -17,6 +17,8 @@
 - TDD Task 3 RED reproduced both creation-time model snapshotting and missing foreground reload. After correcting a diagnostic test-fixture scope error, dynamic registry resolution and idle-boundary foreground reload pass 29/29 tests.
 - Wired authenticated model updates into the production Host: foreground and hidden Agents drain at idle, are disposed, and future resumes resolve the latest DSH selection. Focused Host/API/bridge tests pass 50/50 and Host typecheck passes.
 - TDD frontend RED confirmed the model-normalization helper was absent. Added the model settings page with revisioned save, configuration-path and hot-update semantics; frontend tests pass 5/5 and the production Vite build passes.
+- Deployment reached `edc8ed9` and built successfully, but real startup rejected direct `ctx.settings` access under Cordis injection enforcement. Stopped the restart loop with Nginx still active and began a focused public-service-getter regression before redeployment.
+- TDD deployment fix RED reproduced the Cordis injection rejection; GREEN uses `ctx.get("settings")`, passes 4/4 focused tests and Host typecheck. Fresh full verification passes lint, typecheck, 68 files / 338 tests, production build, and diff check.
 - Full local verification passed after implementation: lint, typecheck, 68 test files / 337 tests, production build, and `git diff --check` all exited 0.
 - Browser acceptance visibly confirmed the desktop model settings page, exact target model, config path, hot-update state and no key field. Post-interruption authenticated HTTP smoke confirmed revision 0 -> 1, exact target selection, `applies=live`, and no secret-shaped response fields.
 

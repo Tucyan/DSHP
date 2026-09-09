@@ -20,13 +20,15 @@ export interface ModelSettingsPort {
   update(selection: ModelSelection, expectedRevision: number): Promise<ModelSettingsView>
 }
 
+interface DshSettingsService {
+  documentPath?: string
+  describe(options: { redactSecrets: true }): Array<{ ns: string; revision: number; applies: string }>
+  replace(namespace: string, section: object, expectedRevision?: number): Promise<void>
+}
+
 interface ModelSettingsContext {
   agentDefaultModel?: { currentSelection?: () => ModelSelection | undefined }
-  settings?: {
-    documentPath?: string
-    describe(options: { redactSecrets: true }): Array<{ ns: string; revision: number; applies: string }>
-    replace(namespace: string, section: object, expectedRevision?: number): Promise<void>
-  }
+  get?(name: 'settings'): DshSettingsService | undefined
 }
 
 function selectionOf(ctx: ModelSettingsContext): ModelSelection {
@@ -36,7 +38,7 @@ function selectionOf(ctx: ModelSettingsContext): ModelSelection {
 }
 
 export function createDshModelSettings(ctx: ModelSettingsContext, afterUpdate: (selection: ModelSelection) => Promise<void> | void = () => undefined): ModelSettingsPort {
-  const settings = ctx.settings
+  const settings = ctx.get?.('settings')
   if (!settings?.describe || !settings.replace) throw new Error('model settings require a writable DSH settings service')
   const view = (): ModelSettingsView => {
     const descriptor = settings.describe({ redactSecrets: true }).find(item => String(item.ns) === MODEL_NAMESPACE)

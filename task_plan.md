@@ -28,6 +28,9 @@ Move the Host model selection into a durable project configuration file and allo
 - The browser session lost Codex authorization after the quota interruption, so the already verified desktop view could not be reused for a mobile screenshot. No browser retry loop or dependency download was attempted; responsive behavior remains covered by the existing CSS breakpoint and production build.
 - The first post-interruption HTTP smoke found the interrupted fixture process gone; after one fixture restart, the first request omitted the required Origin header and failed closed. The corrected authenticated request then passed without touching production data.
 - The first explicit staging command contained a mistyped `dsh-host` path and failed before the commit. Re-ran staging with the verified path list; no files were lost or reverted.
+- First server start on the feature commit exposed a real Cordis injection failure: direct `ctx.settings` access is forbidden without a declared injection. The service was stopped after the redacted log confirmed the cause; Nginx remained active. A regression test now requires the same `ctx.get("settings")` access used by DSH itself.
+- Two local diagnostic invocations contained malformed workspace/test paths; one did not launch and one matched no tests. Both were corrected before accepting evidence; the correctly targeted regression produced the intended RED failure.
+- The first two server build invocations failed before compilation because non-login SSH first lacked `corepack` in PATH, then its shebang selected system Node 12. The service recovery trap worked both times. Pinning Node 24 in PATH made the bounded build pass on the third attempt.
 
 ## Goal
 Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server, preserve the existing Nginx service, keep the admin listener private, and leave a documented environment file for the user to populate.

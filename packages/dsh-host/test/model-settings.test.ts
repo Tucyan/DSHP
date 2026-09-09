@@ -5,18 +5,20 @@ function context() {
   let selection: { provider: string; model: string; reasoningEffort?: string } = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
   let revision = 3
   const writes: unknown[] = []
+  const settings = {
+    documentPath: '/opt/dshp/runtime/dsh-home/settings.yaml',
+    describe: () => [{ ns: 'agent-default-model', value: { ...selection }, revision, applies: 'live' }],
+    async replace(namespace: string, next: typeof selection, expectedRevision: number) {
+      writes.push({ namespace, next, expectedRevision })
+      selection = { ...next }
+      revision += 1
+    },
+  }
   return {
     ctx: {
       agentDefaultModel: { currentSelection: () => ({ ...selection }) },
-      settings: {
-        documentPath: '/opt/dshp/runtime/dsh-home/settings.yaml',
-        describe: () => [{ ns: 'agent-default-model', value: { ...selection }, revision, applies: 'live' }],
-        async replace(namespace: string, next: typeof selection, expectedRevision: number) {
-          writes.push({ namespace, next, expectedRevision })
-          selection = { ...next }
-          revision += 1
-        },
-      },
+      settings,
+      get: (name: string) => name === 'settings' ? settings : undefined,
     },
     writes,
   }
@@ -55,5 +57,15 @@ describe('DSH model settings adapter', () => {
     const fixture = context()
     fixture.ctx.settings.describe = () => []
     expect(() => createDshModelSettings(fixture.ctx as never).view()).toThrow(/agent-default-model/)
+  })
+
+  it('resolves settings through the Cordis service getter instead of direct context access', () => {
+    const fixture = context()
+    const ctx = {
+      agentDefaultModel: fixture.ctx.agentDefaultModel,
+      get(name: string) { return name === 'settings' ? fixture.ctx.settings : undefined },
+      get settings(): never { throw new Error('direct service access requires an undeclared injection') },
+    }
+    expect(createDshModelSettings(ctx as never).view().selection.model).toBe('deepseek-v4-flash')
   })
 })
