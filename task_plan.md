@@ -11,7 +11,7 @@ Move the Host model selection into a durable project configuration file and allo
 - [x] Implement the model configuration store and runtime selector.
 - [x] Add authenticated admin API and management-page editor.
 - [x] Run focused tests, full verification, and document operational semantics.
-- [ ] Commit/push the verified branch and deploy the target model configuration to production.
+- [x] Commit/push the verified branch and deploy the target model configuration to production.
 
 ### Decisions
 - The project configuration file is the persistent source of truth; a successful admin save writes it atomically and updates the in-memory selector in the same operation.

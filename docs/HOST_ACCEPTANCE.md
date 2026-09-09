@@ -32,6 +32,10 @@ Offline smoke creates and removes a temporary root. It exercises actual MemorySe
 
 ## Server verification
 
+Model-settings commits `edc8ed9` and `cfed6c1` were deployed on 2026-09-09. The first production start exposed Cordis service-injection enforcement; `cfed6c1` switched to the public `ctx.get("settings")` path and added a production-shaped regression. The corrected bounded Node 24 build passed and the service stabilized at `cfed6c1`.
+
+The authenticated production model update returned revision 1, `applies: live`, lifecycle running, QQ ready, and empty pending queues. `/opt/dshp/runtime/dsh-home/settings.yaml` is `0600 root:root` and contains `deepseek-official / deepseek-v4.1-flash-expires-on-0910`. The admin listener remains `127.0.0.1:3182`, unauthenticated `/api/model` returns 401, and Nginx remains active. `NRestarts=6` records the failed pre-fix startup attempts and remained stable after the corrected start. Stopped-service backup: `/opt/dshp-backups/20260909T083548Z-before-model-hotupdate-edc8ed9.tar.gz`.
+
 Priority hotfix 78d8193: deployed and verified against the real model on 2026-09-08 at 04:27:50Z; background job completed NOOP, service running, QQ ready, zero restarts.
 
 Completion commit `3e73f0465858fa6a125bb71f3517dddd0bc16933` was deployed by Git bundle on 2026-09-08. The bounded server TypeScript build and offline smoke both exited 0; systemd is active with zero restarts. Stopped-service backup: `/opt/dshp-backups/20260908-before-completion-3e73f04.tar.gz`.
