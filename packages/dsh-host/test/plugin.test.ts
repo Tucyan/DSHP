@@ -47,6 +47,26 @@ describe('production DSH host adapter', () => {
     expect(() => resolveDefaultAgentOptions({} as never)).toThrow(/default model/)
   })
 
+  it('resolves the default model separately for every future Agent instance', async () => {
+    let selection = { provider: 'deepseek-official', model: 'first-model' }
+    const seen: Array<{ provider: string; model: string }> = []
+    const registry = createDshAgentRegistry({
+      sessionPersistence: { async listSnapshots() { return [] } },
+      agentDefaultModel: { currentSelection: () => selection },
+      agents: {
+        async create(options: { agentOptions: { provider: string; model: string }; sessionId: string }) { seen.push(options.agentOptions); return { agent: { id: options.sessionId }, async dispose() {} } },
+        async resume() { throw new Error('not used') },
+      },
+    } as never)
+    await registry.create({ sessionId: 'first-session' })
+    selection = { provider: 'deepseek-official', model: 'second-model' }
+    await registry.create({ sessionId: 'second-session' })
+    expect(seen).toEqual([
+      { provider: 'deepseek-official', model: 'first-model' },
+      { provider: 'deepseek-official', model: 'second-model' },
+    ])
+  })
+
   it('disposes an agent when capabilities are unavailable after synchronous creation', async () => {
     let disposed = 0
     let assertions = 0

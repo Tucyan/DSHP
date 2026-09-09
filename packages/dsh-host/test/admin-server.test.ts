@@ -68,6 +68,7 @@ describe('authenticated admin server', () => {
   it('rejects unauthenticated API calls and serves only compiled assets', async () => {
     const app = await makeServer({ handle: async () => ({ ok: true }) })
     expect((await http(`${app.url}/api/status`)).status).toBe(401)
+    expect((await http(`${app.url}/api/model`)).status).toBe(401)
     expect((await http(`${app.url}/`)).status).toBe(200)
     expect((await http(`${app.url}/assets/app-Ab_12.js`)).status).toBe(200)
     expect((await http(`${app.url}/secret.json`)).status).toBe(404)
@@ -86,8 +87,10 @@ describe('authenticated admin server', () => {
     expect(mutation.status).toBe(404)
     const memory = await http(`${app.url}/api/memory`, { method: 'POST', headers: { Host: '127.0.0.1:' + new URL(app.url).port, Origin: 'http://127.0.0.1:' + new URL(app.url).port, Cookie: cookie, 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' }, body: '{"text":"x"}' })
     expect(memory.status).toBe(200)
-    expect(calls).toHaveLength(2)
-    expect(calls.map(value => (value as { path: string }).path)).toEqual(['/api/status', '/api/memory'])
+    const model = await http(`${app.url}/api/model`, { method: 'PUT', headers: { Host: '127.0.0.1:' + new URL(app.url).port, Origin: 'http://127.0.0.1:' + new URL(app.url).port, Cookie: cookie, 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' }, body: '{"selection":{"provider":"deepseek-official","model":"deepseek-v4.1-flash-expires-on-0910"},"expectedRevision":0}' })
+    expect(model.status).toBe(200)
+    expect(calls).toHaveLength(3)
+    expect(calls.map(value => (value as { path: string }).path)).toEqual(['/api/status', '/api/memory', '/api/model'])
   })
 
   it('sets an eight-hour strict cookie and exposes auth without returning the admin token', async () => {

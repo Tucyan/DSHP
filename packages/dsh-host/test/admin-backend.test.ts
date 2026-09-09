@@ -7,6 +7,8 @@ import { AdminBackend, HostStatus } from '../src/admin/backend.js'
 import { SafeAdminFiles } from '../src/admin/files.js'
 import { PromptStore } from '../src/admin/prompts.js'
 import { HeartbeatController } from '../src/admin/heartbeat.js'
+import { AdminError } from '../src/admin/files.js'
+import type { ModelSelection, ModelSettingsPort } from '../src/admin/model-settings.js'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
@@ -15,11 +17,21 @@ async function setup() {
   const files = new SafeAdminFiles(root); const memory = new MemoryService({ workspaceRoot: join(root, 'workspace') })
   const prompts = new PromptStore(files); await prompts.initialize()
   const heartbeat = new HeartbeatController(files, { timeZone: 'Asia/Singapore', quietHours: { start: '23:00', end: '07:00' }, cooldownMinutes: 120, maxContactsPerDay: 4 }); await heartbeat.initialize()
+  let model: ModelSelection = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  let modelRevision = 0
+  const models: ModelSettingsPort = {
+    view: () => ({ selection: { ...model }, revision: modelRevision, configPath: join(root, 'runtime/dsh-home/settings.yaml'), applies: 'live' }),
+    async update(selection, expectedRevision) {
+      if (expectedRevision !== modelRevision) throw new AdminError(409, 'model_conflict')
+      model = { ...selection }; modelRevision += 1
+      return this.view()
+    },
+  }
   let inspections = 0
   const backend = new AdminBackend({ files, memory, prompts, heartbeat, status: new HostStatus(), sessionIds: ['fg', 'fg-hidden-dream'], sessions: {
     async list() { return [{ id: 'fg' }, { id: 'other' }, { id: 'fg-hidden-dream' }] },
     async read(id, from) { inspections++; return { events: [{ seq: from, type: 'user/message', time: Date.parse('2026-09-07T12:00:00Z'), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'api_key=secret-example' }] } }], id } },
-  }, schedule: async () => [], pending: async () => ({ memory: 0, outbound: 0 }) })
+  }, schedule: async () => [], pending: async () => ({ memory: 0, outbound: 0 }), models })
   const call = (method: string, path: string, body?: unknown, query = '') => backend.handle({ method, path, body, query: new URLSearchParams(query) })
   return { call, inspections: () => inspections, memory }
 }
@@ -52,5 +64,14 @@ describe('Host admin boundary', () => {
     expect((await memory.list('archive')).length).toBe(1)
     expect(await call('GET', '/api/memory/revisions')).toMatchObject({ items: [{ actor: 'web-admin' }, { actor: 'web-admin' }] })
     await expect(call('POST', '/api/memory', { action: 'MERGE' })).rejects.toThrow()
+  })
+  it('reads and updates the persisted default model with strict input and revision checks', async () => {
+    const { call } = await setup()
+    expect(await call('GET', '/api/model')).toMatchObject({ selection: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, revision: 0, applies: 'live' })
+    const updated = await call('PUT', '/api/model', { selection: { provider: 'deepseek-official', model: 'deepseek-v4.1-flash-expires-on-0910', reasoningEffort: 'high' }, expectedRevision: 0 })
+    expect(updated).toMatchObject({ selection: { model: 'deepseek-v4.1-flash-expires-on-0910' }, revision: 1 })
+    expect(await call('GET', '/api/status')).toMatchObject({ model: { model: 'deepseek-v4.1-flash-expires-on-0910' } })
+    await expect(call('PUT', '/api/model', { selection: { provider: 'deepseek-official', model: 'stale' }, expectedRevision: 0 })).rejects.toMatchObject({ statusCode: 409, code: 'model_conflict' })
+    await expect(call('PUT', '/api/model', { selection: { provider: 'deepseek-official', model: 'x', apiKey: 'must-not-be-stored' }, expectedRevision: 1 })).rejects.toMatchObject({ statusCode: 400, code: 'invalid_input' })
   })
 })

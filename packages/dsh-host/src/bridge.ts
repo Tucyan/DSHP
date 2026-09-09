@@ -215,6 +215,19 @@ export class PersonalGrowthBridge {
     return task
   }
 
+  /** Drain and release the cached foreground so its next resume captures new model settings. */
+  async reloadForeground(): Promise<void> {
+    const task = this.processing.then(async () => {
+      const current = this.foreground
+      if (!current) return
+      await current.whenIdle()
+      if (this.foreground === current) this.foreground = undefined
+      await current.dispose?.()
+    })
+    this.processing = task.catch(() => undefined)
+    return task
+  }
+
   /** Sends only the assistant reply for the currently-owned QQ turn. */
   observeActiveUserReply(event: { sessionId: string; seq?: number; text: string; at?: string; messageId?: string; completed?: boolean }): Promise<void> {
     const isCurrentUserTurn = typeof event.messageId === 'string' && event.messageId === this.activeMessageIds.get(event.sessionId)

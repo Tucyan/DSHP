@@ -21,6 +21,7 @@ import { PromptStore } from './admin/prompts.js'
 import { HeartbeatController } from './admin/heartbeat.js'
 import { AdminBackend, HostStatus } from './admin/backend.js'
 import { installManagedPrompt, adminSessions, adminSchedule } from './admin/integration.js'
+import { createDshModelSettings } from './admin/model-settings.js'
 import { startAdminServer } from './admin/server.js'
 import { requestHiddenAction } from './hidden-action.js'
 import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
@@ -371,20 +372,22 @@ export function createDshAgentRegistry(ctx: Context, tracker?: CompletionTracker
   const persistence = (ctx as unknown as { sessionPersistence?: DshSessionPersistence }).sessionPersistence
   if (!persistence || typeof persistence.listSnapshots !== 'function') throw new Error('personal-growth-dsh-host requires public session persistence.listSnapshots')
   const agents = (ctx as unknown as { agents: { resume(options: { resumeSessionId: SessionId; agentOptions?: DshAgentOptions; setup?: (agentCtx: Context) => void }): Promise<AgentHandle>; create(options: { sessionId: SessionId; agentOptions?: DshAgentOptions; setup?: (agentCtx: Context) => void }): Promise<AgentHandle> } }).agents
-  const model = resolveDefaultAgentOptions(ctx)
-  const agentOptions = { provider: model.provider, model: model.model, ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}) }
+  const agentOptions = () => {
+    const model = resolveDefaultAgentOptions(ctx)
+    return { provider: model.provider, model: model.model, ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}) }
+  }
   return {
     async resume({ sessionId }) {
       const id = SessionId(sessionId)
       const snapshots = await persistence.listSnapshots()
       const exists = snapshots.some(snapshot => String(snapshot.header.id) === sessionId)
       if (!exists) return this.create({ sessionId })
-      const handle = await agents.resume({ resumeSessionId: id, agentOptions, ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
+      const handle = await agents.resume({ resumeSessionId: id, agentOptions: agentOptions(), ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
       try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
     async create({ sessionId }) {
-      const handle = await agents.create({ sessionId: SessionId(sessionId), agentOptions, ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
+      const handle = await agents.create({ sessionId: SessionId(sessionId), agentOptions: agentOptions(), ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
       try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
@@ -471,7 +474,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const tracker = completionTracker()
   const bridgeState = new FileBridgeState(resolve(workspaceRoot, '.personal-growth', 'bridge-state.json'))
   const tracePath = resolve(workspaceRoot, '.personal-growth', 'trace.jsonl')
-  const traceTypes = new Set(['inbound', 'outbound', 'history', 'dream_proposal', 'memory_apply', 'memory_consume', 'memory_recovery', 'heartbeat', 'heartbeat_decision'])
+  const traceTypes = new Set(['inbound', 'outbound', 'history', 'dream_proposal', 'memory_apply', 'memory_consume', 'memory_recovery', 'heartbeat', 'heartbeat_decision', 'model'])
   const appendTrace = async (record: Record<string, unknown>): Promise<void> => {
     status.trace(record)
     if (typeof record.type !== 'string' || !traceTypes.has(record.type)) throw new Error('host trace event is outside allowlist')
@@ -502,8 +505,20 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
+  let hiddenReload: Promise<void> | undefined
+  const reloadHiddenAgents = (): Promise<void> => {
+    if (hiddenReload) return hiddenReload
+    const stale = [...hiddenAgents.values()]
+    hiddenAgents.clear()
+    hiddenReload = Promise.all(stale.map(async agent => {
+      await agent.whenIdle()
+      await agent.dispose?.()
+    })).then(() => undefined).finally(() => { hiddenReload = undefined })
+    return hiddenReload
+  }
   const scheduleCandidates = new Map<string, { text: string }>()
   const getHiddenAgent = async (role: 'decision' | 'dream' | 'maintenance'): Promise<BridgeAgent> => {
+    await hiddenReload
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
     if (existing) return existing
@@ -806,10 +821,20 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       status.lifecycle = 'running'
       if (adminEnabled) {
         control.start((role, occurrenceId) => role === 'foreground' ? bridge!.runForegroundWake({ occurrenceId, importance: 0 }) : heartbeat.wakeBackground({ occurrenceId }), settings => { Object.assign(heartbeatService.config, settings.policy) })
+        const models = createDshModelSettings(ctx as never, async selection => {
+          status.model = selection
+          try {
+            await Promise.all([bridge!.reloadForeground(), reloadHiddenAgents()])
+            await appendTrace({ type: 'model', at: new Date().toISOString(), status: 'reloaded' })
+          } catch {
+            await appendTrace({ type: 'model', at: new Date().toISOString(), status: 'reload_failed', reason: 'restart_required' }).catch(() => undefined)
+          }
+        })
         const backend = new AdminBackend({ files: adminFiles, memory: service, prompts, heartbeat: control, status,
           sessionIds: [sessionIdForPeer(allowedPeerId), ...(['decision', 'dream', 'maintenance'] as const).map(role => hiddenSessionId(allowedPeerId, role))],
           sessions: adminSessions(ctx), schedule: adminSchedule(ctx, sessionIdForPeer(allowedPeerId), () => bridge!.ensureForeground()),
           pending: async () => ({ memory: (await bridgeState.listPendingMemoryTurns()).length, outbound: (await bridgeState.listPendingOutbound()).length }),
+          models,
           internalPrompts: INTERNAL_PROMPTS, secrets: [appSecret, process.env.DEEPSEEK_API_KEY ?? ''],
         })
         adminServer = await startAdminServer({ repoRoot: hostPaths.repoRoot, runtimeRoot, assetsRoot: resolve(hostPaths.repoRoot, 'packages/admin-web/dist'), port: config.admin ? config.admin.port : 3182, backend })
@@ -833,6 +858,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       await initialRecovery.finally(() => maintenanceTasks.delete(initialRecovery))
     })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { disposed = true; status.lifecycle = 'stopping'; if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await started.catch(() => undefined); await adminServer?.close(); await control.close(); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined; status.lifecycle = 'stopped'; status.qq = 'stopped' }
+    return async () => { disposed = true; status.lifecycle = 'stopping'; if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await started.catch(() => undefined); await adminServer?.close(); await control.close(); await bridge?.stop(); await hiddenReload?.catch(() => undefined); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined; status.lifecycle = 'stopped'; status.qq = 'stopped' }
   })
 }

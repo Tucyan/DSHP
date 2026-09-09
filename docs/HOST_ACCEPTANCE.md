@@ -22,11 +22,23 @@ node scripts/host-offline-smoke.mjs
 
 Offline smoke creates and removes a temporary root. It exercises actual MemoryService and ExtensionWriter, crash replay, bounded action correction, complete context, and the locked DSH FileSystemSkillProvider list/get APIs. It does not read production credentials or data.
 
+## Model configuration hot update
+
+- The source of truth is `$DSH_HOME/settings.yaml`; this deployment uses `/opt/dshp/runtime/dsh-home/settings.yaml` and the `agent-default-model` namespace.
+- Authenticated `GET/PUT /api/model` exposes only provider, model ID, optional reasoning effort, revision, apply mode, and configuration path. API keys remain environment-only.
+- PUT uses DSH's locked, atomic, revision-checked settings write. A stale management page receives HTTP 409 instead of overwriting a newer edit.
+- A save waits for an in-flight turn to finish, then disposes cached foreground/background Agents. The next request resumes its durable session with the new selection.
+- The exact production target for this change is `deepseek-v4.1-flash-expires-on-0910`; its OpenAI-compatible chat completion endpoint returned HTTP 200 in a real API check on 2026-09-09.
+
 ## Server verification
 
 Priority hotfix 78d8193: deployed and verified against the real model on 2026-09-08 at 04:27:50Z; background job completed NOOP, service running, QQ ready, zero restarts.
 
-The additional completion changes require deployment evidence below before claiming live completion. The opt-in `scripts/host-live-model-smoke.mjs` uses only synthetic facts in a temporary DSH root and a stub QQ transport that rejects sends. It calls the configured real model for three facts and a Skill proposal, loads the generated skill through public DSH APIs and verifies memory replay. It is not evidence of a user receiving a QQ message.
+Completion commit `3e73f0465858fa6a125bb71f3517dddd0bc16933` was deployed by Git bundle on 2026-09-08. The bounded server TypeScript build and offline smoke both exited 0; systemd is active with zero restarts. Stopped-service backup: `/opt/dshp-backups/20260908-before-completion-3e73f04.tar.gz`.
+
+The opt-in `scripts/host-live-model-smoke.mjs` passed against the configured real model on the server: three independent facts, Skill creation, public DSH catalog list/get, and reopened memory replay without duplicates. It used synthetic facts in a temporary DSH root and a stub QQ transport; QQ sends were zero. Reopening storage is not a full process-restart delivery test.
+
+Authenticated production background job `verify-completion-3e73f04` completed at `2026-09-08T11:58:21.315Z` (started `11:58:19.979Z`), action `NOOP`, error null. Host lifecycle was running, QQ ready, pending memory/outbound both zero.
 
 ## Compatibility and recovery
 

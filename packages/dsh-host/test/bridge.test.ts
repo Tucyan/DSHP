@@ -228,6 +228,47 @@ describe('PersonalGrowthBridge', () => {
     await bridge.stop()
   })
 
+  it('reloads the foreground Agent only after active work is idle', async () => {
+    const bounded = async <T>(label: string, task: Promise<T>): Promise<T> => {
+      let timer!: ReturnType<typeof setTimeout>
+      try { return await Promise.race([task, new Promise<T>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`timeout:${label}`)), 500) })]) }
+      finally { clearTimeout(timer) }
+    }
+    const qq = bot()
+    let release!: () => void
+    let markEntered!: () => void
+    const entered = new Promise<void>(resolve => { markEntered = resolve })
+    let hold = true
+    let disposed = 0
+    const first = agent('first', 'first reply')
+    first.whenIdle = async () => { if (!hold) return; hold = false; markEntered(); await new Promise<void>(resolve => { release = resolve }) }
+    first.dispose = async () => { disposed += 1 }
+    const second = agent('second', 'second reply')
+    let resumes = 0
+    const bridge = new PersonalGrowthBridge({
+      bot: qq,
+      registry: { async resume() { resumes += 1; return resumes === 1 ? first : second }, async create() { throw new Error('not used') } },
+      memory: memory(),
+      allowedPeerId: 'user-1',
+      processMemory: false,
+    })
+    await bridge.start()
+    const active = qq.handler!(inbound({ messageId: 'reload-1' }))
+    await bounded('entered', Promise.race([entered, active.then(() => { throw new Error('active completed before Agent idle wait') })]))
+    const reload = bridge.reloadForeground()
+    await Promise.resolve()
+    expect(disposed).toBe(0)
+    release()
+    await bounded('active', active)
+    await bounded('reload', reload)
+    expect(disposed).toBe(1)
+    await bounded('second', qq.handler!(inbound({ messageId: 'reload-2' })))
+    expect(first.followed).toHaveLength(1)
+    expect(second.followed).toHaveLength(1)
+    expect(resumes).toBe(2)
+    await bounded('stop', bridge.stop())
+  })
+
   it('never sends background work to QQ and cancels workers on stop', async () => {
     const qq = bot()
     let foregroundWakes = 0

@@ -13,9 +13,9 @@ const LOGIN_RATE_LIMIT = 10
 const RATE_WINDOW_MS = 60_000
 
 const routes = new Map<string, ReadonlySet<string>>([
-  ['GET', new Set(['/api/status', '/api/sessions', '/api/session', '/api/memory', '/api/memory/document', '/api/memory/revisions', '/api/prompts', '/api/heartbeat', '/api/jobs', '/api/schedules', '/api/diagnostics', '/api/extensions'])],
+  ['GET', new Set(['/api/status', '/api/model', '/api/sessions', '/api/session', '/api/memory', '/api/memory/document', '/api/memory/revisions', '/api/prompts', '/api/heartbeat', '/api/jobs', '/api/schedules', '/api/diagnostics', '/api/extensions'])],
   ['POST', new Set(['/api/memory', '/api/heartbeat/run', '/api/schedules'])],
-  ['PUT', new Set(['/api/prompts', '/api/heartbeat'])],
+  ['PUT', new Set(['/api/model', '/api/prompts', '/api/heartbeat'])],
   ['DELETE', new Set(['/api/schedules'])],
 ])
 

@@ -9,6 +9,13 @@ export function promptDifference(before: string, after: string) {
   const a = before.split('\n'); const b = after.split('\n')
   return Array.from({ length: Math.max(a.length, b.length) }, (_, i) => ({ before: a[i] ?? '', after: b[i] ?? '', line: i + 1 })).filter(row => row.before !== row.after)
 }
+export interface ModelSelectionInput { provider: string; model: string; reasoningEffort: string }
+export interface ModelSelection { provider: string; model: string; reasoningEffort?: string }
+export function normalizeModelSelection(input: ModelSelectionInput): ModelSelection {
+  const provider = input.provider.trim(); const model = input.model.trim(); const reasoningEffort = input.reasoningEffort.trim()
+  if (!provider || !model) throw new Error('模型提供方和模型 ID 不能为空')
+  return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
+}
 export function date(value: unknown) {
   if (typeof value !== 'string' && typeof value !== 'number') return '暂无'
   const parsed = new Date(value)
