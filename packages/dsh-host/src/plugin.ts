@@ -27,7 +27,7 @@ import { requestHiddenAction } from './hidden-action.js'
 import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
 import { executeSkillAction } from './skill-action.js'
 import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
-import { registerSendMessageTool, type SendMessage } from './send-message.js'
+import { registerSendMessageTool, type SendMessage, type SendMessageToolRegistrar } from './send-message.js'
 export { parseAgentActionJson } from './hidden-action.js'
 
 export const name = 'personal-growth-dsh-host'
@@ -255,9 +255,20 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       return { accepted: result.accepted === true }
     },
   })
-  const disposers = [registrar.register(skill), registrar.register(plugin), registrar.register(memory)]
-  disposers.push(registerSendMessageTool(registrar, paths.sendMessage ?? (async () => { throw new Error('send_message is unavailable before the foreground bridge starts') })))
-  return disposers
+  return [registrar.register(skill), registrar.register(plugin), registrar.register(memory)]
+}
+
+/** Register the Host delivery override in the foreground Agent scope.
+ * The QQ bundle owns a global send_message; a scoped registration shadows it
+ * without colliding, while hidden Agents never receive this setup callback.
+ */
+export function installForegroundMessageDelivery(ctx: Context, send: SendMessage): () => void {
+  const tools = (ctx as unknown as { tools?: SendMessageToolRegistrar }).tools
+  if (!tools) throw new Error('personal-growth-dsh-host requires public scoped Agent tools')
+  const disposer = registerSendMessageTool(tools, send)
+  const effect = (ctx as unknown as { effect?: (factory: () => () => void) => unknown }).effect
+  effect?.(() => disposer)
+  return disposer
 }
 
 export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
@@ -504,11 +515,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     extensionWriter,
     ready: pathValidation,
     memoryApply: proposal => memory.apply(proposal),
-    sendMessage: async input => {
-      await pathValidation
-      if (!bridge) throw new Error('send_message is unavailable before the foreground bridge starts')
-      return bridge.sendActiveMessage(input)
-    },
   })
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
@@ -703,6 +709,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const schemas = tools?.schemas?.(agent) ?? []
     assertRequiredAgentTools(schemas.map(schema => schema.name))
   }, (agentCtx, id) => {
+    installForegroundMessageDelivery(agentCtx, async input => {
+      await pathValidation
+      if (!bridge) throw new Error('send_message is unavailable before the foreground bridge starts')
+      return bridge.sendActiveMessage(input)
+    })
     installMessageDeliveryPrompt(agentCtx)
     if (adminEnabled) installManagedPrompt(agentCtx, id, prompts)
   })

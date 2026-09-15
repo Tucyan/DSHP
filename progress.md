@@ -162,3 +162,12 @@
 - 用户已执行修复后的 `production-wake.test.ts`：1 个文件、1 个测试通过，总耗时 3.33 秒。
 - 所有本次更新的自动化验证现已完整通过；进入 commit 与 push 阶段。
 - 已按计划提交并推送当前 `codex/host-completion` 分支，未改写远端历史。
+
+## 2026-09-15 服务器部署
+
+- 已恢复历史部署上下文并确认本地目标提交 `d17eed5` 已推送、工作区干净。
+- 正在复核部署文档和服务器当前状态；尚未停止或修改生产服务。
+
+## 2026-09-15 recovered deployment
+- Confirmed server d17eed5 inactive/dead, zero restarts; existing stopped-service backup 20260915-before-d17eed5 present. Nginx PID 2567685 unchanged.
+- Recovered scoped send_message fix; fresh tsc -b, lint, diff check and 8 focused tests pass. Preparing fix commit and bundle deployment.

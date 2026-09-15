@@ -1,5 +1,23 @@
 # Low-resource server deployment
 
+## 2026-09-15 Deploy in-turn message delivery
+
+### Goal
+Deploy commit `d17eed5` to the existing Alibaba Cloud DSHP service without changing Nginx, then verify the deployed revision, bounded build, systemd health, QQ readiness, private admin binding, and pending durable queues.
+
+### Active Phases
+- [x] Recover prior deployment context and confirm the local branch is clean at the pushed revision.
+- [ ] Re-read the checked-in Linux deployment contract and inspect the server state without mutation.
+- [ ] Transfer/update the server repository to exactly `d17eed5` using the least risky available route.
+- [ ] Run the low-memory bounded build and restart the DSHP systemd service with recovery protection.
+- [ ] Verify deployed SHA, service health/logs, QQ readiness, loopback admin binding, queue state, and unchanged Nginx.
+
+### Decisions
+- Preserve the existing production environment and credentials; never display or rewrite secret values.
+- Do not edit/reload Nginx or run server tests.
+- Prefer the previously successful Git bundle route if GitHub pull is still unreliable.
+- Limit any long-running, download, permission, or timeout-prone command to at most three attempts, changing the approach after each failure.
+
 ## 2026-09-15 In-turn multi-message delivery
 
 ### Goal

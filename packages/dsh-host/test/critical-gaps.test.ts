@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, captureCompletedTurn, registerPersonalGrowthTools, type DshToolRegistrar } from '../src/plugin.js'
+import { apply, captureCompletedTurn, installForegroundMessageDelivery, registerPersonalGrowthTools, type DshToolRegistrar } from '../src/plugin.js'
 import { sessionIdForPeer } from '../src/bridge.js'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,11 +14,14 @@ describe('production host critical contracts', () => {
     expect(captureCompletedTurn(events, 4)).toEqual({ text: 'reply', seq: 2 })
   })
 
-  it('registers strictly-scoped skill and plugin proposal tools through public registration', () => {
+  it('keeps send_message out of the global layer and installs it in the foreground scope', () => {
     const names: string[] = []
     const registrar: DshToolRegistrar = { register(tool) { names.push(tool.name); return () => undefined } }
     registerPersonalGrowthTools(registrar, { agentsHome: 'C:/isolated/agents-home', proposals: 'C:/isolated/proposals' })
-    expect(names).toEqual(['personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply', 'send_message'])
+    expect(names).toEqual(['personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'])
+    const scopedNames: string[] = []
+    installForegroundMessageDelivery({ tools: { register(tool: { name: string }) { scopedNames.push(tool.name); return () => undefined } } } as never, async () => ({ id: 'id', status: 'sent' }))
+    expect(scopedNames).toEqual(['send_message'])
   })
 
   it('consumes only the fixed foreground session while retaining schedule plugin prompts', async () => {

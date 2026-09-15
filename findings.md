@@ -107,3 +107,11 @@
 - `production-wake.test.ts` 在修复测试桩之前连续 3 次触发 5 秒超时。系统化排查确认测试桩还缺少新前台提示词安装需要的 `systemPrompt.section()`，现已补齐；依据 AGENTS.md 的最多 3 次超时尝试限制，修复后必须由用户执行一次确认，命令为：
   `corepack pnpm@11.7.0 exec vitest run packages/dsh-host/test/production-wake.test.ts --reporter=verbose`
 - 用户已运行修复后的命令并提供通过证据：`production-wake.test.ts` 1/1 通过，总耗时 3.33 秒。当前不存在未通过的本次更新验证项，可以进行 commit 与 push。
+
+## 2026-09-15 服务器更新准备
+
+- 本地 `codex/host-completion` 工作区干净并与 `origin/codex/host-completion` 同步；目标提交为 `d17eed5`。
+- 既有生产基线为 `3e73f04`，systemd 服务、QQ readiness、私有管理端口和后台心跳曾通过验收。
+- 服务器曾多次无法稳定从 GitHub 拉取；Git bundle 已被验证为可靠的离线传输路线。
+- 现有操作约束继续适用：2 核/2GB 主机串行构建、Node heap 约 768MB、不在服务器运行测试、不改 Nginx、不输出凭据。
+- 已定位部署资料：`docs/LINUX_DEPLOYMENT.md`、`docs/HOST_ACCEPTANCE.md`、`scripts/render-systemd.mjs`、`scripts/host-offline-smoke.mjs`。
