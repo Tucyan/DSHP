@@ -171,3 +171,7 @@
 ## 2026-09-15 recovered deployment
 - Confirmed server d17eed5 inactive/dead, zero restarts; existing stopped-service backup 20260915-before-d17eed5 present. Nginx PID 2567685 unchanged.
 - Recovered scoped send_message fix; fresh tsc -b, lint, diff check and 8 focused tests pass. Preparing fix commit and bundle deployment.
+
+- Deployed dc3a9c9 by verified Git bundle and fast-forward. Server bounded tsc build exit 0; service active/running, NRestarts=0.
+- Authenticated status HTTP 200: lifecycle running, QQ ready, memory/outbound queues 0. Existing foreground/background heartbeat settings paused. Admin listens only 127.0.0.1:3182; env mode 600; Nginx PID/timestamp unchanged.
+- Fix pushed to origin/codex/host-completion. Real QQ delivery has not been sent or exercised in this continuation.

@@ -177,3 +177,11 @@ Implement the approved localhost, token-protected real Host administration UI: s
 - [x] Production background heartbeat verify-completion-3e73f04 completed NOOP without error at 2026-09-08T11:58:21.315Z; lifecycle running, QQ ready, queues empty.
 - [ ] Task 6 remaining boundary: user QQ delivery and reminder delivery across a process restart have not been exercised; requires user-triggered input or explicit test-message authorization.
 - This update supersedes the earlier unchecked implementation/deployment entries, while retaining historical records.
+
+## 2026-09-15 deployment completed after recovery
+- [x] Inspected server and existing stopped-service backup.
+- [x] Fixed global QQ send_message collision with foreground scoped registration (dc3a9c9).
+- [x] Verified local build/lint/8 focused tests, pushed fix, transferred bundle and fast-forwarded server.
+- [x] Bounded server build and service restart; authenticated QQ readiness and empty queues verified.
+- [x] Confirmed private listener, credential mode and unchanged Nginx.
+- Real QQ message delivery remains a user acceptance check.
