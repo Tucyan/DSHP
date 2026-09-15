@@ -112,6 +112,20 @@ describe('production DSH host adapter', () => {
     await agent.whenIdle()
     expect(agent.reply).toBeUndefined()
   })
+  it('waits for native agent idle even after tracked turn completion', async () => {
+    let nativeWaits = 0
+    const tracker = { begin() {}, has() { return false }, assistant() {}, complete() { return undefined }, async wait() { return 'done' } }
+    const registry = createDshAgentRegistry({
+      sessionPersistence: { listSnapshots: async () => [] },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+      agents: { create: async () => ({ agent: { id: 'test', followup() {}, async whenIdle() { nativeWaits++ } }, async dispose() {} }) },
+    } as never, tracker)
+    const agent = await registry.create({ sessionId: 'test' })
+    agent.followup({ text: 'wake', source: 'heartbeat' })
+    await agent.whenIdle()
+    expect(nativeWaits).toBe(1)
+    expect(agent.reply).toBe('done')
+  })
 
   it('normalizes only the project workspace/runtime layout and rejects home defaults', () => {
     const root = resolve('isolated-host-root')

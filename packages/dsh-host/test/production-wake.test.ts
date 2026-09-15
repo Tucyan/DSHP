@@ -46,11 +46,11 @@ describe('production Host wake composition', () => {
         async create(options: { sessionId: string; setup?: (ctx: unknown) => void }) {
           const id = String(options.sessionId)
           const ctx = {
-            tools: { restrict() {}, guard() {}, schemas: () => availableTools.map(name => ({ name })) },
+            tools: { register() { return () => undefined }, restrict() {}, guard() {}, schemas: () => availableTools.map(name => ({ name })) },
             systemPrompt: { section() {} },
           }
           options.setup?.(ctx)
-          const agent = { id, ctx, async whenIdle() {}, followup(message: { content: Array<{ text: string }> }) {
+          const agent = { id, ctx, inject() {}, async whenIdle() {}, followup(message: { content: Array<{ text: string }> }) {
             prompts.push(message.content.map(block => block.text).join(''))
             queueMicrotask(() => {
               const text = id.endsWith('maintenance') ? '{"type":"CREATE_SKILL","name":"exam-review","instructions":"Review supplied notes."}' : '{"type":"NOOP","reason":"no unsolicited contact needed"}'

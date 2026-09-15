@@ -1,3 +1,4 @@
+import { DELIVERY_FALLBACK, DELIVERY_REPAIR_PROMPT } from '../src/send-message.js'
 import { describe, expect, it } from 'vitest'
 import {
   PersonalGrowthBridge,
@@ -187,8 +188,8 @@ describe('PersonalGrowthBridge', () => {
     await qq.handler?.(inbound())
     expect(userAgent.injected[0]).toContain('用户适合晚上')
     expect(userAgent.injected[0]).toContain('正在准备')
-    expect(userAgent.followed).toEqual(['今天完成了学习'])
-    expect(qq.sent).toEqual([])
+    expect(userAgent.followed).toEqual(['今天完成了学习', DELIVERY_REPAIR_PROMPT])
+    expect(qq.sent).toEqual([DELIVERY_FALLBACK])
     await bridge.stop()
   })
 
@@ -292,7 +293,7 @@ describe('PersonalGrowthBridge', () => {
     release()
     await first
     await second
-    expect(userAgent.followed).toEqual(['first', 'second'])
+    expect(userAgent.followed).toEqual(['first', DELIVERY_REPAIR_PROMPT, 'second', DELIVERY_REPAIR_PROMPT])
     expect(mem.consumed.every(events => events.every(event => {
       const value = event as { role?: string; content?: string }
       return (value.role === 'user' || value.role === 'assistant') && value.content !== 'injected context'
@@ -335,8 +336,8 @@ describe('PersonalGrowthBridge', () => {
     await bounded('reload', reload)
     expect(disposed).toBe(1)
     await bounded('second', qq.handler!(inbound({ messageId: 'reload-2' })))
-    expect(first.followed).toHaveLength(1)
-    expect(second.followed).toHaveLength(1)
+    expect(first.followed).toHaveLength(2)
+    expect(second.followed).toHaveLength(2)
     expect(resumes).toBe(2)
     await bounded('stop', bridge.stop())
   })
@@ -461,8 +462,8 @@ describe('PersonalGrowthBridge', () => {
     await bridge.start()
     await qq.handler?.(inbound({ messageId: 'same' }))
     await qq.handler?.(inbound({ messageId: 'same' }))
-    expect(userAgent.followed).toHaveLength(1)
-    expect(bridgeState.sequences.get(sessionIdForPeer('user-1'))).toBe(2)
+    expect(userAgent.followed).toHaveLength(2)
+    expect(bridgeState.sequences.get(sessionIdForPeer('user-1'))).toBe(3)
     await bridge.stop()
   })
 })

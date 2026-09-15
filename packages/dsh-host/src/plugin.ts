@@ -17,7 +17,8 @@ import { DreamService, HistoryRecordSchema, ProposalSchema } from '@personal-gro
 import { ExtensionWriter } from '@personal-growth/runtime'
 import { resolveIsolatedPaths, validateIsolatedPaths, validateIsolatedPathsAsync, type IsolatedPaths } from '@personal-growth/dsh-adapter'
 import { SafeAdminFiles } from './admin/files.js'
-import { PromptStore } from './admin/prompts.js'
+import { PromptStore, DEFAULT_FOREGROUND_HEARTBEAT_PROMPT } from './admin/prompts.js'
+import { ForegroundWakeRunner } from './foreground-wake.js'
 import { HeartbeatController } from './admin/heartbeat.js'
 import { AdminBackend, HostStatus } from './admin/backend.js'
 import { installManagedPrompt, installMessageDeliveryPrompt, adminSessions, adminSchedule } from './admin/integration.js'
@@ -367,12 +368,15 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
     followup(message) {
       tracker?.begin(String(agent.id))
       wrapped.reply = undefined
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'user' } }))
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: !message.source || message.source === 'user' ? { kind: 'user' } : { kind: 'plugin', plugin: 'personal-growth-dsh-host', form: 'snapshot', sections: [{ name: message.source, text: message.text }] } }))
+    },
+    recordSent: async (id, text) => {
+      if (!agent.session.events.some(event => event.type === 'personal-growth/message-sent' && event.data.id === id)) agent.session.append('personal-growth/message-sent', { id, callId: 'host-fallback', text })
     },
     whenIdle: async () => {
       if (tracker) {
         const text = await tracker.wait(String(agent.id))
-        if (text !== undefined) { wrapped.reply = text; return }
+        if (text !== undefined) wrapped.reply = text
       }
       await agent.whenIdle()
     },
@@ -589,34 +593,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         if (trigger.type === 'foreground_heartbeat') {
           const candidate = scheduleCandidates.get(trigger.occurrenceId)
           if (candidate) return { type: 'MESSAGE_USER', text: candidate.text, importance: 'normal' }
-          const sessionId = sessionIdForPeer(allowedPeerId)
-          const context = await buildHeartbeatContext({
-            identity: async () => {
-              if (adminEnabled) { const value = prompts.view(); return { soul: value.soul.text, mission: value.mission.text } }
-              return { soul: await adminFiles.read('workspace/SOUL.md'), mission: await adminFiles.read('workspace/AGENT.md') }
-            },
-            profile: () => memory.readProfile(),
-            memories: () => memory.search('recent goals progress follow-up', 8),
-            recent: async () => {
-              const exists = (await ctx.sessionPersistence.listSnapshots()).some(item => String(item.header.id) === sessionId)
-              if (!exists) return []
-              return recentUserConversation((await ctx.sessionPersistence.inspect(SessionId(sessionId))).events)
-            },
-            goal: async () => {
-              if (!bridge) throw new Error('foreground_unavailable')
-              await bridge.ensureForeground()
-              const agent = ctx.agents.get(SessionId(sessionId))
-              const goals = (ctx as unknown as { goals?: { get(agent: Agent): unknown } }).goals
-              if (!agent || !goals) throw new Error('goal_unavailable')
-              return goals.get(agent) ?? null
-            },
-            schedules: async () => await adminSchedule(ctx, sessionId, async () => undefined)('list', {}) as unknown[],
-            lastContact: async () => (await heartbeatService.ledger.read()).contacts.map(item => item.at).sort().at(-1) ?? null,
-          }, { at: trigger.at, timeZone: heartbeatService.config.timeZone, triggerId: trigger.occurrenceId })
-          await appendTrace({ type: 'heartbeat', at: trigger.at, key: trigger.occurrenceId, status: context.ready ? 'context_ready' : 'context_unavailable', reason: context.sources.filter(item => item.status !== 'available').map(item => item.name).join(',') || (context.truncated ? 'context_truncated' : 'context_complete') })
-          if (!context.ready) return { type: 'NOOP', reason: '必要上下文暂不可用，本轮不主动联系' }
-          return requestHiddenAction('decision', trigger, `${INTERNAL_PROMPTS.decision}\n${context.prompt}`, prompt => hiddenText('decision', prompt))
+          return { type: 'NOOP', reason: 'periodic_wake_runs_main_agent' }
         }
+        const maintenanceId = hiddenSessionId(allowedPeerId, 'maintenance')
+        if (adminEnabled) prompts.beginHeartbeat(maintenanceId, 'background')
+        const maintenancePrompt = adminEnabled ? prompts.heartbeatText(maintenanceId, 'background') : INTERNAL_PROMPTS.maintenance
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
         const pending = []
@@ -668,11 +649,39 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         const maintenanceProfile = await memory.readProfile()
         const maintenanceIndex = await memory.readIndex()
         const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
-        return requestHiddenAction('maintenance', trigger, `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`, prompt => hiddenText('maintenance', prompt))
+        return requestHiddenAction('maintenance', trigger, `${maintenancePrompt}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`, prompt => hiddenText('maintenance', prompt))
       },
     },
     sink: { append: async record => { await appendTrace({ type: 'heartbeat_decision', ...record }) } },
   })
+  const foregroundRunner = new ForegroundWakeRunner(heartbeatService)
+  const foregroundPrompt = async (): Promise<string> => {
+    const sessionId = sessionIdForPeer(allowedPeerId)
+    if (adminEnabled) prompts.beginHeartbeat(sessionId, 'foreground')
+    const instruction = adminEnabled ? prompts.heartbeatText(sessionId, 'foreground') : DEFAULT_FOREGROUND_HEARTBEAT_PROMPT
+    const context = await buildHeartbeatContext({
+      identity: async () => {
+        if (adminEnabled) { const value = prompts.view(); return { soul: value.soul.text, mission: value.mission.text } }
+        return { soul: await adminFiles.read('workspace/SOUL.md'), mission: await adminFiles.read('workspace/AGENT.md') }
+      },
+      profile: () => memory.readProfile(),
+      memories: () => memory.search('recent goals progress follow-up', 8),
+      recent: async () => {
+        const exists = (await ctx.sessionPersistence.listSnapshots()).some(item => String(item.header.id) === sessionId)
+        if (!exists) return []
+        return recentUserConversation((await ctx.sessionPersistence.inspect(SessionId(sessionId))).events)
+      },
+      goal: async () => {
+        const agent = ctx.agents.get(SessionId(sessionId))
+        const goals = (ctx as unknown as { goals?: { get(agent: Agent): unknown } }).goals
+        if (!agent || !goals) throw new Error('goal_unavailable')
+        return goals.get(agent) ?? null
+      },
+      schedules: async () => await adminSchedule(ctx, sessionId, async () => undefined)('list', {}) as unknown[],
+      lastContact: async () => (await heartbeatService.ledger.read()).contacts.map(item => item.at).sort().at(-1) ?? null,
+    }, { at: heartbeatService.now(), timeZone: heartbeatService.config.timeZone, triggerId: 'main-agent-heartbeat' })
+    return `${instruction}\n这是定期心跳，不是用户消息。联系用户只能使用 send_message；无需联系时静默结束。\nCONTEXT:\n${context.prompt}`
+  }
   const heartbeat: BridgeHeartbeat = config.heartbeat ?? {
     wakeForeground: async input => {
       await pathValidation
@@ -715,6 +724,8 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       return bridge.sendActiveMessage(input)
     })
     installMessageDeliveryPrompt(agentCtx)
+    const tools = (agentCtx as unknown as { tools: { guard(check: (execution: { name: string }) => string | undefined): unknown } }).tools
+    tools.guard(execution => bridge?.isRepairingDelivery() && execution.name !== 'send_message' ? 'delivery_repair_only_send_message' : undefined)
     if (adminEnabled) installManagedPrompt(agentCtx, id, prompts)
   })
   const dispatchScheduleCandidate = async (sessionId: string, turn: number, text: string, at: string): Promise<void> => {
@@ -722,7 +733,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const occurrenceId = scheduleOccurrenceId(sessionId, turn)
     scheduleCandidates.set(occurrenceId, { text })
     try {
-      if (bridge) await bridge.runForegroundWake({ occurrenceId, at, importance: 1 })
+      if (bridge) await bridge.deliverScheduleWake({ occurrenceId, at, importance: 1 })
     } finally {
       scheduleCandidates.delete(occurrenceId)
     }
@@ -734,6 +745,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const userData = events.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
     const source = userData?.source ?? userData?.message?.source
     const isUserOwnedTurn = source?.kind === 'user'
+    const isHostWake = source?.kind === 'plugin' && source.plugin === name
     const hasSentMessages = events.some(event => event.type === 'personal-growth/message-sent')
     const sentIds = new Set<string>()
     const messages: Array<{ role: 'user' | 'assistant'; content: string; at: string }> = []
@@ -752,7 +764,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       const content = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
       const source = message?.source
       const isInjectedSnapshot = source?.kind === 'plugin' && source.plugin === name && source.form === 'snapshot'
-      if (event.type === 'assistant/message' && isUserOwnedTurn && hasSentMessages) continue
+      if (event.type === 'assistant/message' && (isHostWake || (isUserOwnedTurn && hasSentMessages))) continue
       if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && isInjectedSnapshot)) continue
       messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
     }
@@ -842,7 +854,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       await pathValidation
       if (disposed) return
       if (adminEnabled) { await prompts.initialize(); await control.initialize(); if (disposed) return }
-      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }, status), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, dream: dreamAdapter, heartbeat, allowedPeerId, cadence: adminEnabled ? {} : config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { status.lifecycle = 'error'; process.nextTick(() => { throw error }) } })
+      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }, status), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, recordFallback: async (key, text) => {
+        const sessionId = sessionIdForPeer(allowedPeerId)
+        const batch = await bridgeState.claimMemoryTurnBatch!(key, sessionId, [{ sessionId, role: 'assistant', content: text, at: new Date().toISOString() }])
+        if (batch.status === 'claimed') await consumeDurableMemoryTurn(key, sessionId, batch.events)
+      }, dream: dreamAdapter, heartbeat, foregroundWake: config.heartbeat ? undefined : { prompt: foregroundPrompt, run: (input, execute) => foregroundRunner.run(input, execute), deliver: (key, send) => foregroundRunner.deliver(key, send) }, allowedPeerId, cadence: adminEnabled ? {} : config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { status.lifecycle = 'error'; process.nextTick(() => { throw error }) } })
       await bridge.start()
       if (disposed) { await bridge.stop(); return }
       status.lifecycle = 'running'

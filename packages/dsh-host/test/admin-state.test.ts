@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PromptStore } from '../src/admin/prompts.js'
+import { DEFAULT_BACKGROUND_HEARTBEAT_PROMPT, DEFAULT_FOREGROUND_HEARTBEAT_PROMPT, PromptStore } from '../src/admin/prompts.js'
 import { SafeAdminFiles } from '../src/admin/files.js'
 import { HeartbeatController } from '../src/admin/heartbeat.js'
 
@@ -15,6 +15,34 @@ async function fixture() {
   return { root, files: new SafeAdminFiles(root) }
 }
 describe('managed prompt versions', () => {
+  it('migrates persisted version 1 prompts with default heartbeat instructions', async () => {
+    const { root, files } = await fixture()
+    await mkdir(join(root, 'runtime/admin'), { recursive: true })
+    await writeFile(join(root, 'runtime/admin/prompts.json'), JSON.stringify({
+      version: 1,
+      soul: { text: 'old soul', hash: '0'.repeat(64) },
+      mission: { text: 'old mission', hash: '1'.repeat(64) },
+      history: [],
+    }))
+    const prompts = new PromptStore(files)
+    await prompts.initialize()
+    expect(prompts.view()).toMatchObject({ version: 2, foregroundHeartbeat: { text: DEFAULT_FOREGROUND_HEARTBEAT_PROMPT }, backgroundHeartbeat: { text: DEFAULT_BACKGROUND_HEARTBEAT_PROMPT } })
+    expect(JSON.parse(await readFile(join(root, 'runtime/admin/prompts.json'), 'utf8')).version).toBe(2)
+  })
+
+  it('persists editable heartbeat prompts and rejects stale heartbeat hashes', async () => {
+    const { root, files } = await fixture(); const prompts = new PromptStore(files)
+    await prompts.initialize()
+    const before = prompts.view()
+    const next = '前台心跳新指令：检查目标，有事用工具推进。'
+    await prompts.update({ key: 'foregroundHeartbeat', text: next, expectedHash: before.foregroundHeartbeat.hash })
+    expect(prompts.view().foregroundHeartbeat).toMatchObject({ text: next })
+    await expect(prompts.update({ key: 'foregroundHeartbeat', text: 'stale', expectedHash: before.foregroundHeartbeat.hash })).rejects.toMatchObject({ statusCode: 409, code: 'prompt_conflict' })
+    const reopened = new PromptStore(files); await reopened.initialize()
+    expect(reopened.view().foregroundHeartbeat.text).toBe(next)
+    expect(JSON.parse(await readFile(join(root, 'runtime/admin/prompts.json'), 'utf8')).foregroundHeartbeat.text).toBe(next)
+  })
+
   it('imports files and holds current turn stable until the next beginTurn', async () => {
     const { root, files } = await fixture(); const prompts = new PromptStore(files)
     await prompts.initialize(); prompts.beginTurn('foreground')

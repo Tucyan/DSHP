@@ -74,4 +74,14 @@ describe('Host admin boundary', () => {
     await expect(call('PUT', '/api/model', { selection: { provider: 'deepseek-official', model: 'stale' }, expectedRevision: 0 })).rejects.toMatchObject({ statusCode: 409, code: 'model_conflict' })
     await expect(call('PUT', '/api/model', { selection: { provider: 'deepseek-official', model: 'x', apiKey: 'must-not-be-stored' }, expectedRevision: 1 })).rejects.toMatchObject({ statusCode: 400, code: 'invalid_input' })
   })
+
+  it('exposes and updates foreground and background heartbeat prompt documents', async () => {
+    const { call } = await setup()
+    const current = await call('GET', '/api/prompts') as { foregroundHeartbeat: { text: string; hash: string }; backgroundHeartbeat: { text: string; hash: string } }
+    expect(current.foregroundHeartbeat.text).toContain('send_message')
+    expect(current.backgroundHeartbeat.text).toContain('后台维护器')
+    const updated = await call('PUT', '/api/prompts', { key: 'backgroundHeartbeat', text: '后台新指令', expectedHash: current.backgroundHeartbeat.hash }) as typeof current
+    expect(updated.backgroundHeartbeat.text).toBe('后台新指令')
+    await expect(call('PUT', '/api/prompts', { key: 'backgroundHeartbeat', text: 'stale', expectedHash: current.backgroundHeartbeat.hash })).rejects.toMatchObject({ statusCode: 409, code: 'prompt_conflict' })
+  })
 })

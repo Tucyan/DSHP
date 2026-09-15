@@ -175,3 +175,15 @@
 - Deployed dc3a9c9 by verified Git bundle and fast-forward. Server bounded tsc build exit 0; service active/running, NRestarts=0.
 - Authenticated status HTTP 200: lifecycle running, QQ ready, memory/outbound queues 0. Existing foreground/background heartbeat settings paused. Admin listens only 127.0.0.1:3182; env mode 600; Nginx PID/timestamp unchanged.
 - Fix pushed to origin/codex/host-completion. Real QQ delivery has not been sent or exercised in this continuation.
+
+## 2026-09-15 silent reply investigation
+- Read production traces and all concatenated session zstd frames. Turns 24 and 26 completed with plain assistant text and no send_message/outbound. Turn 25 delivered three messages and user confirmed receipt.
+- Actual request header contains delivery instruction. Root cause: model omitted required tool and Host has no user-turn delivery completion guard.
+- Recorded next-version heartbeat main-agent wake, silent-reply reliability, editable hot-loaded heartbeat prompts in docs/plans/NEXT_VERSION.md. No live model requests, QQ sends, or production changes in investigation.
+
+## Next version implementation 2026-09-15
+- Main-agent foreground wakes and user delivery correction/fallback implemented; heartbeat prompts editable with v1-to-v2 migration and per-wake snapshots.
+- First parallel verify hit existing 5-second integration deadlines. Same two suites passed serially; maxWorkers=1 makes verify deterministic without relaxing assertions.
+- Full serial suite passed: 71 files, 360 tests. Build completion and independent reviews pending.
+- Browser inspection unavailable (connection fetch failure); using API/UI compile checks. Server still dc3a9c9 active/running; preserve its edited workspace/SOUL.md during update.
+- No additional live model requests or QQ test sends.

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { SendMessageInput, SendMessageResult, SendMessageStatus } from './send-message.js'
+import { DELIVERY_FALLBACK, DELIVERY_REPAIR_PROMPT, type SendMessageInput, type SendMessageResult, type SendMessageStatus } from './send-message.js'
 
 export interface BridgeInbound {
   peerId: string
@@ -32,6 +32,7 @@ export interface BridgeAgent {
   /** Test-only fallback. Production turn completion is tracked by the host plugin. */
   reply?: string
   dispose?: () => Promise<void>
+  recordSent?: (id: string, text: string) => Promise<void>
 }
 
 export interface BridgeAgentRegistry {
@@ -118,6 +119,11 @@ export interface PersonalGrowthBridgeOptions {
   state?: BridgeState
   dream?: BridgeDream
   heartbeat?: BridgeHeartbeat
+  foregroundWake?: {
+    prompt(): Promise<string>
+    run(input: { occurrenceId: string; at?: string }, execute: () => Promise<void>): Promise<unknown>
+    deliver(key: string, send: () => Promise<SendMessageStatus>): Promise<SendMessageStatus>
+  }
   allowedPeerId: string
   now?: () => string
   cadence?: { foregroundMs?: number; backgroundMs?: number }
@@ -125,6 +131,7 @@ export interface PersonalGrowthBridgeOptions {
   onStartError?: (error: unknown) => void
   /** Production DSH session observers own the single consume/Dream pipeline. */
   processMemory?: boolean
+  recordFallback?: (id: string, text: string) => Promise<void>
   trace?: (record: { type: string; at: string; key?: string; status?: string; reason?: string }) => void | Promise<void>
 }
 
@@ -155,6 +162,11 @@ export class PersonalGrowthBridge {
   private botStartError?: unknown
   private readonly workerTasks = new Set<Promise<unknown>>()
   private readonly activeMessageIds = new Map<string, string>()
+  private activeDelivery?: { kind: 'user' | 'heartbeat'; sent: number; finalSent: boolean; uncertain: boolean }
+  private pendingWake?: Promise<unknown>
+  private repairing = false
+
+  isRepairingDelivery(): boolean { return this.repairing }
 
   constructor(options: PersonalGrowthBridgeOptions) {
     this.options = options
@@ -177,7 +189,7 @@ export class PersonalGrowthBridge {
       this.options.onStartError?.(error)
     })
     const cadence = this.options.cadence
-    if (this.options.heartbeat && cadence?.foregroundMs && cadence.foregroundMs > 0) {
+    if ((this.options.heartbeat || this.options.foregroundWake) && cadence?.foregroundMs && cadence.foregroundMs > 0) {
       this.foregroundTimer = setInterval(() => this.trackWorker(this.runForegroundWake({ occurrenceId: this.occurrenceId('foreground'), importance: 0 })), cadence.foregroundMs)
     }
     if (this.options.heartbeat && cadence?.backgroundMs && cadence.backgroundMs > 0) {
@@ -199,6 +211,37 @@ export class PersonalGrowthBridge {
 
   /** Run one foreground proactive turn through the same durable foreground agent. */
   async runForegroundWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<unknown> {
+    if (this.options.foregroundWake) {
+      if (!this.started) return
+      if (this.pendingWake) return this.pendingWake
+      const wake = this.options.foregroundWake
+      const operation = this.processing.then(async () => {
+        if (!this.started) return
+        return wake.run(input, async () => {
+          const agent = await this.getForeground()
+          const prompt = await wake.prompt()
+          agent.inject({ text: `长期用户上下文\n${await this.options.memory.readProfile()}\n${(await this.options.memory.search('recent goals progress follow-up', 8)).join('\n')}`, source: 'personal-memory' })
+          this.activeMessageIds.set(agent.id, `heartbeat:${input.occurrenceId}`)
+          this.activeDelivery = { kind: 'heartbeat', sent: 0, finalSent: false, uncertain: false }
+          try {
+            agent.followup({ text: prompt, source: 'heartbeat' })
+            await agent.whenIdle()
+            await this.emitTrace({ type: 'heartbeat', at: new Date().toISOString(), key: input.occurrenceId, status: 'completed', reason: this.activeDelivery.uncertain ? 'delivery_unknown' : this.activeDelivery.sent ? 'message_sent' : 'silent' })
+          } finally {
+            this.activeMessageIds.delete(agent.id)
+            this.activeDelivery = undefined
+          }
+        })
+      })
+      this.processing = operation.then(() => undefined, () => undefined)
+      this.pendingWake = operation
+      try { return await operation } finally { this.pendingWake = undefined }
+    }
+    return this.deliverScheduleWake(input)
+  }
+
+  /** Official schedule completion keeps its separate admission and delivery path. */
+  async deliverScheduleWake(input: { occurrenceId: string; at?: string; importance?: number }): Promise<unknown> {
     if (!this.started || !this.options.heartbeat) return
     const result = await this.options.heartbeat.wakeForeground(input) as { action?: { type?: string; text?: string } } | undefined
     if (result?.action?.type === 'MESSAGE_USER' && result.action.text?.trim()) {
@@ -233,11 +276,25 @@ export class PersonalGrowthBridge {
     const sessionId = sessionIdForPeer(this.options.allowedPeerId)
     const inboundId = this.activeMessageIds.get(sessionId)
     if (!inboundId || input.agentId !== sessionId || this.foreground?.id !== input.agentId) throw new Error('send_message requires the active foreground user turn')
+    if (input.executionSource !== undefined) {
+      const expected = this.repairing ? 'delivery-repair' : this.activeDelivery?.kind
+      if (input.executionSource !== expected) throw new Error('send_message source does not own the active foreground turn')
+    }
     if (!input.callId || input.callId.length > 512) throw new Error('send_message call identity is invalid')
     if (!input.text.trim() || input.text.length > 4_096) throw new Error('send_message text must contain 1 to 4096 characters')
     const callDigest = createHash('sha256').update(input.callId, 'utf8').digest('hex').slice(0, 32)
     const id = `${sessionId}:turn:${inboundId}:send:${callDigest}`
-    const status = await this.sendOutbound(id, { peerId: this.options.allowedPeerId, messageId: inboundId }, input.text)
+    const delivery = this.activeDelivery
+    if (delivery?.uncertain) return { id, status: 'unknown' }
+    let status: SendMessageStatus
+    try {
+      const send = () => this.sendOutbound(id, { peerId: this.options.allowedPeerId, ...(delivery?.kind === 'heartbeat' ? {} : { messageId: inboundId }) }, input.text)
+      status = delivery?.kind === 'heartbeat' ? await this.options.foregroundWake!.deliver(id, send) : await send()
+    } catch (error) { if (delivery) delivery.uncertain = true; throw error }
+    if (delivery) {
+      if (status === 'sent' || status === 'already_sent') { delivery.sent++; if (input.purpose !== 'progress') delivery.finalSent = true }
+      if (status === 'pending' || status === 'unknown') delivery.uncertain = true
+    }
     return { id, status }
   }
 
@@ -297,9 +354,37 @@ export class PersonalGrowthBridge {
       agent.inject({ text: `长期用户上下文\nPROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}`, source: 'personal-memory' })
       const before = agent.events?.() ?? []
       this.activeMessageIds.set(sessionId, message.messageId)
+      this.activeDelivery = { kind: 'user', sent: 0, finalSent: false, uncertain: false }
       agent.followup({ text: message.text, source: 'user', messageId: message.messageId })
-      await agent.whenIdle()
+      let executionFailed = false
+      try { await agent.whenIdle() } catch {
+        executionFailed = true
+        await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'execution_failed', reason: 'agent_failure' })
+      }
       await ensureLease()
+      if (!this.activeDelivery.finalSent && !this.activeDelivery.uncertain) {
+        await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'repairing', reason: this.activeDelivery.sent ? 'no_final_reply' : 'no_message_sent' })
+        try {
+          if (!executionFailed) {
+            this.repairing = true
+            agent.followup({ text: DELIVERY_REPAIR_PROMPT, source: 'delivery-repair' })
+            await agent.whenIdle()
+          }
+        } catch { /* A failed correction still gets a fixed public fallback, unless transport is uncertain. */ }
+        finally { this.repairing = false }
+        await ensureLease()
+        if (!this.activeDelivery.finalSent && !this.activeDelivery.uncertain) {
+          const id = `${sessionId}:turn:${message.messageId}:fallback`
+          const delivery = await this.sendOutbound(id, { peerId: this.options.allowedPeerId, messageId: message.messageId }, DELIVERY_FALLBACK)
+          if (delivery === 'sent' || delivery === 'already_sent') {
+            await agent.recordSent?.(id, DELIVERY_FALLBACK)
+            if (this.options.recordFallback) await this.options.recordFallback(id, DELIVERY_FALLBACK)
+            else await this.options.memory.consume([{ sessionId, seq: await this.nextSequence(sessionId), role: 'assistant', content: DELIVERY_FALLBACK, at: new Date().toISOString() }])
+          }
+          await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'delivery_fallback', reason: delivery })
+        }
+      }
+      if (this.activeDelivery.uncertain) await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'delivery_unknown', reason: 'transport_unconfirmed' })
       const after = agent.events?.() ?? []
       const assistantText = textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
       if (this.options.processMemory === false) {
@@ -332,6 +417,7 @@ export class PersonalGrowthBridge {
       clearInterval(renewal)
       await renewalInFlight?.catch(() => undefined)
       this.activeMessageIds.delete(sessionId)
+      this.activeDelivery = undefined
     }
   }
 

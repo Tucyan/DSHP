@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { registerSendMessageTool, type SendMessageInput, type SendMessageResult } from '../src/send-message.js'
+import { deliverySource, registerSendMessageTool, type SendMessageInput, type SendMessageResult } from '../src/send-message.js'
 import type { DshToolRegistrar } from '../src/plugin.js'
 
 function captureTool(send: (input: SendMessageInput) => Promise<SendMessageResult>): ToolDefinition {
@@ -12,12 +12,30 @@ function captureTool(send: (input: SendMessageInput) => Promise<SendMessageResul
 }
 
 describe('send_message tool', () => {
-  it('exposes text as its only model-controlled argument', () => {
+  it('classifies the current turn and never borrows an earlier user source', () => {
+    const user = { type: 'user/message', data: { source: { kind: 'user' } } }
+    const start = { type: 'turn/start', data: { turn: 2 } }
+    expect(deliverySource([user, start, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-schedule' } } }])).toBe('other')
+    expect(deliverySource([start, user])).toBe('user')
+    expect(deliverySource([start, { type: 'user/message', data: { message: user.data } }])).toBe('user')
+    for (const name of ['heartbeat', 'delivery-repair'] as const) expect(deliverySource([start, { type: 'user/message', data: { message: { source: { kind: 'plugin', plugin: 'personal-growth-dsh-host', sections: [{ name }] } } } }])).toBe(name)
+    for (const source of ['heartbeat', 'delivery-repair'] as const) expect(deliverySource([start, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'personal-growth-dsh-host', sections: [{ name: source }] } } }])).toBe(source)
+  })
+  it('rejects changing the purpose of a previously confirmed call before dispatch', async () => {
+    let calls = 0
+    const tool = captureTool(async () => { calls++; return { id: 'stable', status: calls === 1 ? 'sent' : 'already_sent' } })
+    const session = Session.create(SessionId('foreground'))
+    const exec = { agent: { id: session.id, session }, callId: 'call-progress' } as never
+    await tool.execute({ text: 'working', purpose: 'progress' }, exec)
+    await expect(tool.execute({ text: 'working', purpose: 'final' }, exec)).rejects.toThrow(/identity conflict/)
+    expect(calls).toBe(1)
+  })
+  it('exposes message text and purpose without destination controls', () => {
     const tool = captureTool(async () => ({ id: 'message-id', status: 'sent' }))
     expect(tool.name).toBe('send_message')
     expect(tool.parameters).toEqual({
       type: 'object',
-      properties: { text: { type: 'string', description: 'One complete user-visible message.' } },
+      properties: { text: { type: 'string', description: 'One complete user-visible message.' }, purpose: { type: 'string', enum: ['progress', 'final'], description: 'progress for an interim update, final for the answer. Defaults to final.' } },
       required: ['text'],
     })
   })
@@ -28,7 +46,7 @@ describe('send_message tool', () => {
     const session = Session.create(SessionId('foreground'))
     let concluded = false
     const result = await tool.execute({ text: '阶段结果' }, { agent: { id: session.id, session }, callId: 'call-1', concludeTurn() { concluded = true } } as never)
-    expect(calls).toEqual([{ agentId: 'foreground', callId: 'call-1', text: '阶段结果' }])
+    expect(calls).toEqual([{ agentId: 'foreground', callId: 'call-1', text: '阶段结果', executionSource: 'other' }])
     expect(result).toEqual({ id: 'message-id', status: 'sent' })
     expect(concluded).toBe(false)
   })
