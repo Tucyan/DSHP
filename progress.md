@@ -187,3 +187,13 @@
 - Full serial suite passed: 71 files, 360 tests. Build completion and independent reviews pending.
 - Browser inspection unavailable (connection fetch failure); using API/UI compile checks. Server still dc3a9c9 active/running; preserve its edited workspace/SOUL.md during update.
 - No additional live model requests or QQ test sends.
+
+## Next version verification and deployment completed 2026-09-15
+- Final serial `corepack pnpm@11.7.0 verify` passed: 71 test files, 364 tests, lint, typecheck, and admin-web production build.
+- Spec review passed after adding compatibility for both flat and nested session event sources in `send_message` delivery ownership checks.
+- Committed and pushed `b973df0` to `origin/codex/main-agent-heartbeat`.
+- Server stopped-state backup `/opt/dshp-backups/20260915-before-b973df0/runtime-workspace.tgz` created before update; user-edited `workspace/SOUL.md`, PROFILE, and 学习日志 preserved.
+- Server fast-forwarded to `b973df0`; bounded TypeScript/admin builds passed, service active/running with `NRestarts=0`.
+- Authenticated admin probe passed: lifecycle running, QQ ready, memory/outbound queues 0, prompt schema version 2 with both heartbeat prompts present; foreground unpaused and background paused state preserved.
+- Admin listener remains `127.0.0.1:3182`, environment mode `600`, Nginx MainPID `2567685` and start timestamp unchanged. Server offline smoke passed.
+- No live model requests or QQ test messages were sent in this release verification; delivery behavior is covered by deterministic tests and runtime diagnostics.
