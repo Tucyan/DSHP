@@ -1,5 +1,21 @@
 # Web admin findings
 
+## 2026-09-15 in-turn multi-message delivery
+
+- The worktree is clean on `codex/host-completion`, tracking `origin/codex/host-completion` at `b17a1a0`.
+- QQ already has durable outbound claim/complete/fail states and rejects unresolved pending sends as `OUTBOUND_UNCERTAIN`; the new design should reuse this mechanism instead of adding a second delivery ledger.
+- `FakeQqAdapter.send` already deduplicates confirmed `idempotencyKey` values and prohibits `background` sends.
+- Existing root planning files contain historical deployment work and must be extended rather than replaced.
+- `PersonalGrowthBridge.process` currently waits for the whole Agent turn, derives one final assistant text, sends it with `${sessionId}:turn:${inboundMessageId}`, and then records only that final text for the fallback memory path.
+- In production, the Host `session/event` observer captures the final `assistant/message` at `turn/end`, calls `observeActiveUserReply`, and the bridge suppresses its fallback send through `observed`; this is the automatic final-forwarding path that must be removed.
+- Global tools are registered through DSH `defineTool`. Foreground and hidden Agents share the registry, while hidden setups already restrict/guard tools; the new send tool must additionally verify the executing Agent/session so global registration cannot bypass permissions.
+- Production memory consumes native session events in `consumeStandaloneTurn`; if tool-triggered sends are appended as assistant session events by DSH, they naturally enter history once. The implementation must confirm that behavior or explicitly supply one durable history event per confirmed send.
+- Agent turn sequencing is serialized in `PersonalGrowthBridge.processing`, and outbound delivery is serialized by awaited tool execution plus `FileBridgeState` claim state. A per-turn ordinal can form stable keys such as `${sessionId}:turn:${messageId}:send:${ordinal}`.
+- Inspection attempted a nonexistent `packages/qq-adapter/src/contracts.ts` and a Windows-invalid glob under `node_modules/.pnpm`; neither changed files. Continue from the real `port.ts`/`durable-port.ts` files and resolve package paths with `rg --files`.
+- DSH exposes the executing `Agent` and immutable `callId` to every `ToolRunContext`; the Agent exposes its durable `session`, whose append-only log supports plugin-augmented event types. This provides a public way to persist a sent-message event without corrupting the ordered model surface.
+- A dedicated non-surface `personal-growth/message-sent` event avoids inserting a synthetic assistant message between `tool/call` and `tool/result`, while still giving admin history and the Host memory consumer the exact confirmed body.
+- The immutable delivery rules should be installed as a Host system-prompt section, with `workspace/AGENT.md` and the bootstrap default kept consistent for operational clarity.
+
 ## 2026-09-09 model configuration hot update
 
 - `AdminBackend` already centralizes validated routes, mutation auditing, and safe error translation; `admin/server.ts` separately allowlists HTTP methods and paths.
@@ -83,3 +99,11 @@
 - Server 3e73f04 passes real-model isolated three-fact memory and Skill catalog acceptance; production background heartbeat completes without heartbeat_failed.
 - Develop and run the full suite locally; server only needs bounded build and environment-specific smoke. Direct server code editing is unnecessary.
 - Memory reopen/replay smoke establishes persistence/idempotency, not real QQ reminder delivery across a process restart.
+## 2026-09-15 最终验证状态
+
+- 静态复核确认本次实现覆盖验收路径：同轮可按工具调用顺序发送多条消息；发送后不结束 ReAct 循环；已确认成功的调用重试返回 `already_sent` 且不重复发送；任务结束时不再自动转发普通 assistant 文本；已发送正文通过原生 session event 进入历史与记忆；隐藏/后台 agent 无发送权限；主动联系仍走既有策略。
+- 根级 `lint`、`typecheck`、`build` 均以退出码 0 完成。
+- 相关聚焦测试最终通过 7 个文件、46 个测试；扩大范围（排除 `production-wake.test.ts`）通过 23 个文件、150 个测试。
+- `production-wake.test.ts` 在修复测试桩之前连续 3 次触发 5 秒超时。系统化排查确认测试桩还缺少新前台提示词安装需要的 `systemPrompt.section()`，现已补齐；依据 AGENTS.md 的最多 3 次超时尝试限制，修复后必须由用户执行一次确认，命令为：
+  `corepack pnpm@11.7.0 exec vitest run packages/dsh-host/test/production-wake.test.ts --reporter=verbose`
+- 用户已运行修复后的命令并提供通过证据：`production-wake.test.ts` 1/1 通过，总耗时 3.33 秒。当前不存在未通过的本次更新验证项，可以进行 commit 与 push。

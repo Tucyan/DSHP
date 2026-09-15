@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { SendMessageInput, SendMessageResult, SendMessageStatus } from './send-message.js'
 
 export interface BridgeInbound {
   peerId: string
@@ -28,7 +29,7 @@ export interface BridgeAgent {
   whenIdle(): Promise<void>
   /** Production adapters expose the session event log. Test doubles may omit it. */
   events?: () => readonly BridgeSessionEvent[]
-  /** Test-only fallback. Production output is observed through the host plugin. */
+  /** Test-only fallback. Production turn completion is tracked by the host plugin. */
   reply?: string
   dispose?: () => Promise<void>
 }
@@ -146,7 +147,6 @@ export class PersonalGrowthBridge {
   private readonly options: PersonalGrowthBridgeOptions
   private foreground?: BridgeAgent
   private processing: Promise<void> = Promise.resolve()
-  private readonly observed = new Map<string, string>()
   private foregroundTimer?: ReturnType<typeof setInterval>
   private backgroundTimer?: ReturnType<typeof setInterval>
   private started = false
@@ -228,19 +228,18 @@ export class PersonalGrowthBridge {
     return task
   }
 
-  /** Sends only the assistant reply for the currently-owned QQ turn. */
-  observeActiveUserReply(event: { sessionId: string; seq?: number; text: string; at?: string; messageId?: string; completed?: boolean }): Promise<void> {
-    const isCurrentUserTurn = typeof event.messageId === 'string' && event.messageId === this.activeMessageIds.get(event.sessionId)
-    if (isCurrentUserTurn && event.completed !== false && event.text.trim() && event.sessionId === sessionIdForPeer(this.options.allowedPeerId)) {
-      this.observed.set(event.sessionId, event.text)
-      const key = `${event.sessionId}:turn:${event.messageId}`
-      const task = this.sendOutbound(key, { peerId: this.options.allowedPeerId, messageId: event.messageId }, event.text)
-      this.trackWorker(task)
-      return task
-    }
-    return Promise.resolve()
+  /** Deliver one tool-authored message for the currently-owned foreground user turn. */
+  async sendActiveMessage(input: SendMessageInput): Promise<SendMessageResult> {
+    const sessionId = sessionIdForPeer(this.options.allowedPeerId)
+    const inboundId = this.activeMessageIds.get(sessionId)
+    if (!inboundId || input.agentId !== sessionId || this.foreground?.id !== input.agentId) throw new Error('send_message requires the active foreground user turn')
+    if (!input.callId || input.callId.length > 512) throw new Error('send_message call identity is invalid')
+    if (!input.text.trim() || input.text.length > 4_096) throw new Error('send_message text must contain 1 to 4096 characters')
+    const callDigest = createHash('sha256').update(input.callId, 'utf8').digest('hex').slice(0, 32)
+    const id = `${sessionId}:turn:${inboundId}:send:${callDigest}`
+    const status = await this.sendOutbound(id, { peerId: this.options.allowedPeerId, messageId: inboundId }, input.text)
+    return { id, status }
   }
-
 
   private enqueue(message: BridgeInbound): Promise<void> {
     const operation = this.processing.then(async () => {
@@ -297,19 +296,12 @@ export class PersonalGrowthBridge {
       await ensureLease()
       agent.inject({ text: `长期用户上下文\nPROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}`, source: 'personal-memory' })
       const before = agent.events?.() ?? []
-      this.observed.delete(sessionId)
       this.activeMessageIds.set(sessionId, message.messageId)
-    agent.followup({ text: message.text, source: 'user', messageId: message.messageId })
+      agent.followup({ text: message.text, source: 'user', messageId: message.messageId })
       await agent.whenIdle()
       await ensureLease()
       const after = agent.events?.() ?? []
-      const assistantText = this.observed.get(sessionId) ?? textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
-      if (assistantText?.trim() && !this.observed.has(sessionId)) {
-        await ensureLease()
-        const key = `${sessionId}:turn:${message.messageId}`
-        await this.sendOutbound(key, { peerId: message.peerId, messageId: message.messageId }, assistantText)
-        await ensureLease()
-      }
+      const assistantText = textFromEvents(after.slice(before.length), 'assistant/message') ?? agent.reply
       if (this.options.processMemory === false) {
         await ensureLease()
         await this.options.state?.completeInbound?.(message.messageId)
@@ -363,19 +355,19 @@ export class PersonalGrowthBridge {
     void task.finally(() => this.workerTasks.delete(task)).catch(() => undefined)
   }
 
-  private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<void> {
+  private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<SendMessageStatus> {
     const state = this.options.state
     const envelope = { target, text }
     if (target.peerId !== this.options.allowedPeerId) {
       const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : 'unknown'
       if (status === 'claimed') await state?.markOutboundUnknown?.(key)
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'quarantined', reason: 'peer_mismatch' })
-      return
+      return 'unknown'
     }
     const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : ((await state?.acceptOutbound(key)) ?? true ? 'claimed' : 'sent')
     if (status !== 'claimed') {
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status })
-      return
+      return status === 'sent' ? 'already_sent' : status
     }
     await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'pending' })
     try {
@@ -383,6 +375,7 @@ export class PersonalGrowthBridge {
       await this.options.bot.sendText(target, text)
       if (state?.completeOutbound) await state.completeOutbound(key)
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'sent' })
+      return 'sent'
     } catch (error) {
       if (state?.markOutboundUnknown) await state.markOutboundUnknown(key)
       else await state?.failOutbound?.(key)

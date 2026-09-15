@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { apply, assertRequiredAgentTools, createDshAgentRegistry, isCanonicalPathWithin, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
+import { apply, assertRequiredAgentTools, createDshAgentRegistry, isCanonicalPathWithin, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, REQUIRED_AGENT_TOOLS, type DshSessionPersistence } from '../src/plugin.js'
 import { join, resolve } from 'node:path'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 describe('production DSH host adapter', () => {
   it('requires the native shell tool on each platform', () => {
-    const common = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill']
+    const common = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message']
     expect(() => assertRequiredAgentTools([...common, 'bash'], 'linux')).not.toThrow()
     expect(() => assertRequiredAgentTools([...common, 'bash'], 'darwin')).not.toThrow()
     expect(() => assertRequiredAgentTools([...common, 'pwsh'], 'win32')).not.toThrow()
@@ -18,8 +18,9 @@ describe('production DSH host adapter', () => {
     expect(() => assertRequiredAgentTools(['read', 'write', 'edit'])).toThrow(/schedule_create/)
     expect(() => assertRequiredAgentTools([
       'schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal',
-      'read', 'write', 'edit', 'glob', 'grep', 'skill', process.platform === 'win32' ? 'pwsh' : 'bash',
+      'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message', process.platform === 'win32' ? 'pwsh' : 'bash',
     ])).not.toThrow()
+    expect(REQUIRED_AGENT_TOOLS).toContain('send_message')
   })
 
   it('uses persistence existence before resume/create and never converts resume errors', async () => {
@@ -90,7 +91,7 @@ describe('production DSH host adapter', () => {
     createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined }, guard(value: typeof guard) { guard = value } } } as never)
     expect(calls).toEqual([{ allow: ['skill'] }])
     expect(guard({ name: 'skill' })).toBeUndefined()
-    for (const name of ['personal_skill_create', 'personal_memory_apply', 'schedule_create', 'write']) expect(guard({ name })).toBeTruthy()
+    for (const name of ['personal_skill_create', 'personal_memory_apply', 'send_message', 'schedule_create', 'write']) expect(guard({ name })).toBeTruthy()
   })
 
   it('restricts decision and Dream agents to read-only skill lookup', () => {

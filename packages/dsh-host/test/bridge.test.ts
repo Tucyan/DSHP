@@ -174,7 +174,7 @@ describe('PersonalGrowthBridge', () => {
     await bridge.stop()
   })
 
-  it('injects profile and relevant memory, then emits one final assistant message', async () => {
+  it('injects profile and relevant memory without automatically forwarding final assistant text', async () => {
     const qq = bot()
     const userAgent = agent('foreground', '这是最终答复。')
     const mem = memory()
@@ -188,7 +188,79 @@ describe('PersonalGrowthBridge', () => {
     expect(userAgent.injected[0]).toContain('用户适合晚上')
     expect(userAgent.injected[0]).toContain('正在准备')
     expect(userAgent.followed).toEqual(['今天完成了学习'])
-    expect(qq.sent).toEqual(['这是最终答复。'])
+    expect(qq.sent).toEqual([])
+    await bridge.stop()
+  })
+
+  it('sends two independently identified messages before the foreground turn becomes idle and then keeps working', async () => {
+    const qq = bot()
+    const bridgeState = state()
+    const userAgent = agent(sessionIdForPeer('user-1'), 'unsent automatic reply')
+    let continuedAfterFirstSend = false
+    const results: Array<{ id: string; status: string }> = []
+    userAgent.whenIdle = async () => {
+      results.push(await bridge.sendActiveMessage({ agentId: userAgent.id, callId: 'call-progress', text: '阶段一' }))
+      expect(qq.sent).toEqual(['阶段一'])
+      continuedAfterFirstSend = true
+      results.push(await bridge.sendActiveMessage({ agentId: userAgent.id, callId: 'call-final', text: '最终结论' }))
+    }
+    const bridge = new PersonalGrowthBridge({
+      bot: qq,
+      registry: { async resume() { return userAgent }, async create() { return userAgent } },
+      memory: memory(),
+      state: bridgeState,
+      allowedPeerId: 'user-1',
+      processMemory: false,
+    })
+    await bridge.start()
+    await qq.handler?.(inbound({ messageId: 'multi-send' }))
+    expect(continuedAfterFirstSend).toBe(true)
+    expect(qq.sent).toEqual(['阶段一', '最终结论'])
+    expect(results.map(result => result.status)).toEqual(['sent', 'sent'])
+    expect(new Set(results.map(result => result.id)).size).toBe(2)
+    await bridge.stop()
+  })
+
+  it('reuses one durable id for a retried send call without sending twice', async () => {
+    const qq = bot()
+    const bridgeState = state()
+    const userAgent = agent(sessionIdForPeer('user-1'))
+    const results: Array<{ id: string; status: string }> = []
+    userAgent.whenIdle = async () => {
+      results.push(await bridge.sendActiveMessage({ agentId: userAgent.id, callId: 'same-call', text: '只发送一次' }))
+      results.push(await bridge.sendActiveMessage({ agentId: userAgent.id, callId: 'same-call', text: '只发送一次' }))
+    }
+    const bridge = new PersonalGrowthBridge({
+      bot: qq,
+      registry: { async resume() { return userAgent }, async create() { return userAgent } },
+      memory: memory(),
+      state: bridgeState,
+      allowedPeerId: 'user-1',
+      processMemory: false,
+    })
+    await bridge.start()
+    await qq.handler?.(inbound({ messageId: 'retry-send' }))
+    expect(results.map(result => result.status)).toEqual(['sent', 'already_sent'])
+    expect(results[0]!.id).toBe(results[1]!.id)
+    expect(qq.sent).toEqual(['只发送一次'])
+    await bridge.stop()
+  })
+
+  it('rejects send_message outside the active foreground user turn', async () => {
+    const qq = bot()
+    const foregroundId = sessionIdForPeer('user-1')
+    const bridge = new PersonalGrowthBridge({
+      bot: qq,
+      registry: { async resume() { return agent(foregroundId) }, async create() { return agent(foregroundId) } },
+      memory: memory(),
+      state: state(),
+      allowedPeerId: 'user-1',
+      processMemory: false,
+    })
+    await bridge.start()
+    await expect(bridge.sendActiveMessage({ agentId: foregroundId, callId: 'inactive', text: '不能发送' })).rejects.toThrow(/active foreground user turn/)
+    await expect(bridge.sendActiveMessage({ agentId: 'hidden-maintenance', callId: 'hidden', text: '不能发送' })).rejects.toThrow(/active foreground user turn/)
+    expect(qq.sent).toEqual([])
     await bridge.stop()
   })
 
@@ -322,7 +394,7 @@ describe('PersonalGrowthBridge', () => {
     await bridge.stop()
   })
 
-  it('does not expose a generic observer or allow an unverified event to send', async () => {
+  it('does not expose any assistant-event observer that could bypass send_message', async () => {
     const qq = bot()
     const bridge = new PersonalGrowthBridge({
       bot: qq,
@@ -332,7 +404,7 @@ describe('PersonalGrowthBridge', () => {
     })
     await bridge.start()
     expect('observeAgentEvent' in bridge).toBe(false)
-    await bridge.observeActiveUserReply({ sessionId: sessionIdForPeer('user-1'), text: '未经验证', completed: true, messageId: 'forged' })
+    expect('observeActiveUserReply' in bridge).toBe(false)
     expect(qq.sent).toEqual([])
     await bridge.stop()
   })

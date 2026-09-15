@@ -20,13 +20,14 @@ import { SafeAdminFiles } from './admin/files.js'
 import { PromptStore } from './admin/prompts.js'
 import { HeartbeatController } from './admin/heartbeat.js'
 import { AdminBackend, HostStatus } from './admin/backend.js'
-import { installManagedPrompt, adminSessions, adminSchedule } from './admin/integration.js'
+import { installManagedPrompt, installMessageDeliveryPrompt, adminSessions, adminSchedule } from './admin/integration.js'
 import { createDshModelSettings } from './admin/model-settings.js'
 import { startAdminServer } from './admin/server.js'
 import { requestHiddenAction } from './hidden-action.js'
 import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
 import { executeSkillAction } from './skill-action.js'
 import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
+import { registerSendMessageTool, type SendMessage } from './send-message.js'
 export { parseAgentActionJson } from './hidden-action.js'
 
 export const name = 'personal-growth-dsh-host'
@@ -164,7 +165,7 @@ export function captureCompletedTurn(events: readonly { seq: number; type: strin
 }
 
 export interface DshToolRegistrar { register(definition: ToolDefinition): () => void }
-export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter; ready?: Promise<void> }
+export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter; ready?: Promise<void>; sendMessage?: SendMessage }
 
 function safeSlug(value: string): string {
   const slug = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
@@ -254,7 +255,9 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       return { accepted: result.accepted === true }
     },
   })
-  return [registrar.register(skill), registrar.register(plugin), registrar.register(memory)]
+  const disposers = [registrar.register(skill), registrar.register(plugin), registrar.register(memory)]
+  disposers.push(registerSendMessageTool(registrar, paths.sendMessage ?? (async () => { throw new Error('send_message is unavailable before the foreground bridge starts') })))
+  return disposers
 }
 
 export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
@@ -266,7 +269,7 @@ export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
 export const REQUIRED_AGENT_TOOLS = [
   'schedule_create', 'schedule_list', 'schedule_delete',
   'get_goal', 'create_goal', 'update_goal',
-  'read', 'write', 'edit', 'glob', 'grep', 'skill',
+  'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message',
 ] as const
 
 /** Setup callback for the hidden maintenance root; restriction happens before publication. */
@@ -304,23 +307,22 @@ function inbound(message: QQBotInboundMessage): BridgeInbound {
 }
 
 interface CompletionTracker {
-  begin(agentId: string, messageId?: string): void
+  begin(agentId: string): void
   has(agentId: string): boolean
   assistant(agentId: string, text: string): void
   complete(agentId: string, ok: boolean, durableTask?: Promise<void>): string | undefined
-  messageId(agentId: string): string | undefined
   wait(agentId: string): Promise<string | undefined>
 }
 
 function completionTracker(): CompletionTracker {
-  const pending = new Map<string, { messageId?: string; text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
+  const pending = new Map<string, { text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
   return {
-    begin(agentId, messageId) {
+    begin(agentId) {
       if (pending.has(agentId)) throw new Error(`agent ${agentId} already has a pending turn`)
       let resolve!: (text: string | undefined) => void
       let reject!: (error: unknown) => void
       const promise = new Promise<string | undefined>((done, fail) => { resolve = done; reject = fail })
-      pending.set(agentId, { messageId, promise, resolve, reject })
+      pending.set(agentId, { promise, resolve, reject })
     },
     has(agentId) { return pending.has(agentId) },
     assistant(agentId, text) {
@@ -337,7 +339,6 @@ function completionTracker(): CompletionTracker {
       } else turn.resolve(text)
       return text
     },
-    messageId(agentId) { return pending.get(agentId)?.messageId },
     wait(agentId) {
       return pending.get(agentId)?.promise ?? Promise.resolve(undefined)
     },
@@ -353,7 +354,7 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
       agent.inject(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'plugin', plugin: 'personal-growth-dsh-host', form: 'snapshot', sections: [{ name: 'context', text: message.text }] } }))
     },
     followup(message) {
-      tracker?.begin(String(agent.id), message.messageId)
+      tracker?.begin(String(agent.id))
       wrapped.reply = undefined
       agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'user' } }))
     },
@@ -496,12 +497,18 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   // ExtensionWriter has its own runtime trace schema. Keep it in a separate
   // file so the host trace reader never has to accept two incompatible shapes.
   const extensionWriter = new ExtensionWriter(agentsHome, runtimeRoot, resolve(runtimeRoot, 'extension-trace.jsonl'))
+  let bridge: PersonalGrowthBridge | undefined
   const toolDisposers = registerPersonalGrowthTools(toolRuntime, {
     agentsHome,
     proposals: resolve(runtimeRoot, 'plugin-proposals'),
     extensionWriter,
     ready: pathValidation,
     memoryApply: proposal => memory.apply(proposal),
+    sendMessage: async input => {
+      await pathValidation
+      if (!bridge) throw new Error('send_message is unavailable before the foreground bridge starts')
+      return bridge.sendActiveMessage(input)
+    },
   })
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
@@ -695,8 +702,10 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const tools = (agent.ctx as unknown as { tools?: { schemas?: (scope?: unknown) => readonly { name: string }[] } }).tools
     const schemas = tools?.schemas?.(agent) ?? []
     assertRequiredAgentTools(schemas.map(schema => schema.name))
-  }, adminEnabled ? (agentCtx, id) => installManagedPrompt(agentCtx, id, prompts) : undefined)
-  let bridge: PersonalGrowthBridge | undefined
+  }, (agentCtx, id) => {
+    installMessageDeliveryPrompt(agentCtx)
+    if (adminEnabled) installManagedPrompt(agentCtx, id, prompts)
+  })
   const dispatchScheduleCandidate = async (sessionId: string, turn: number, text: string, at: string): Promise<void> => {
     await pathValidation
     const occurrenceId = scheduleOccurrenceId(sessionId, turn)
@@ -711,14 +720,28 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const activeTurns = new Map<string, number>()
   const maintenanceTasks = new Set<Promise<unknown>>()
   const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
+    const userData = events.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
+    const source = userData?.source ?? userData?.message?.source
+    const isUserOwnedTurn = source?.kind === 'user'
+    const hasSentMessages = events.some(event => event.type === 'personal-growth/message-sent')
+    const sentIds = new Set<string>()
     const messages: Array<{ role: 'user' | 'assistant'; content: string; at: string }> = []
     for (const event of events) {
+      if (event.type === 'personal-growth/message-sent') {
+        const data = event.data as { id?: string; text?: string }
+        if (typeof data.id === 'string' && typeof data.text === 'string' && data.text.trim() && !sentIds.has(data.id)) {
+          sentIds.add(data.id)
+          messages.push({ role: 'assistant', content: data.text, at: new Date().toISOString() })
+        }
+        continue
+      }
       if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
       const data = event.data as { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }>; message?: { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }> } }
       const message = event.type === 'user/message' ? (Array.isArray(data.content) ? data : data.message) : data.message
       const content = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
       const source = message?.source
       const isInjectedSnapshot = source?.kind === 'plugin' && source.plugin === name && source.form === 'snapshot'
+      if (event.type === 'assistant/message' && isUserOwnedTurn && hasSentMessages) continue
       if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && isInjectedSnapshot)) continue
       messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
     }
@@ -785,7 +808,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const userData = eventsForTurn.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
     const source = userData?.source ?? userData?.message?.source
     const isScheduleTurn = source?.kind === 'plugin' && source.plugin !== name && /schedule/i.test(source.plugin ?? '')
-    const isUserOwnedTurn = source?.kind === 'user'
     const memoryTask = completed && sessionId === foregroundSessionId
       ? pathValidation.then(() => consumeStandaloneTurn(sessionId, eventsForTurn, `${sessionId}:turn:${event.data.turn}`))
       : undefined
@@ -793,13 +815,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       maintenanceTasks.add(memoryTask)
       void memoryTask.finally(() => maintenanceTasks.delete(memoryTask)).catch(() => undefined)
     }
-    const userMessageId = tracker.messageId(sessionId)
     const text = tracker.complete(sessionId, completed, memoryTask)
-    if (completed && bridge && isUserOwnedTurn && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
-      void bridge.observeActiveUserReply({ sessionId, text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, messageId: userMessageId, at: new Date(event.time).toISOString() }).catch(() => {
-        void appendTrace({ type: 'outbound', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'observe_failure' }).catch(() => undefined)
-      })
-    }
     if (completed && isScheduleTurn && (captured?.text ?? text)?.trim() && sessionId === foregroundSessionId) {
       void dispatchScheduleCandidate(sessionId, event.data.turn, captured?.text ?? text!, new Date(event.time).toISOString()).catch(() => {
         void appendTrace({ type: 'heartbeat', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'schedule_policy_failure' }).catch(() => undefined)

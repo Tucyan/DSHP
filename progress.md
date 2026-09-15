@@ -1,5 +1,23 @@
 # Web admin progress
 
+## 2026-09-15
+
+- Started the in-turn multi-message delivery update.
+- Read the applicable planning, TDD, execution, and verification skill instructions.
+- Ran planning session catch-up; no unsynchronized session report was emitted.
+- Confirmed clean branch `codex/host-completion` and GitHub origin.
+- The first planning-file patch failed on a stale progress heading and made no changes; inspected the real heading and reapplied safely.
+- Mapped the existing bridge final-send path, production session-event observer, durable outbound state machine, tool registration, memory event pipeline, and hidden-tool restrictions.
+- Saved the detailed implementation plan at `docs/superpowers/plans/2026-09-15-in-turn-multi-message-delivery.md` and mapped every acceptance criterion to focused tests.
+- RED confirmed: the tool module and fourth registration were missing. The first GREEN attempt then caught an invalid DSH output-schema form; corrected it to the documented value-schema DSL.
+- Completed RED/GREEN cycles for active multi-send delivery, retry dedupe, no automatic final forwarding, durable sent-message history, memory ingestion, tool/prompt wiring, hidden denial, and bootstrap defaults.
+- Focused Host typecheck exposed two static typing issues; corrected them without changing behavior. Runtime typecheck passed on that run.
+- Host typecheck then passed with exit 0.
+- Documented the session-bound delivery, call-id idempotency, sent-event history, Memory, and hidden-agent boundaries in `docs/ARCHITECTURE.md`.
+- Focused Host/QQ/Runtime run: 150/151 passed; `production-wake` timed out. Systematic isolation reproduced it and traced the cause to its stale fake tool catalog, now updated with `send_message`.
+- Final allowed `production-wake` attempt exposed a second stale fixture seam by continued code tracing: foreground setup now needs `systemPrompt.section`. Added that no-op test seam; the user must run this one test once because repository instructions prohibit a fourth timeout attempt in this session.
+- Fresh focused verification excluding the capped `production-wake` case passed 23 files / 150 tests. First lint then found three mechanical issues, which were corrected.
+
 ## 2026-09-09 model configuration hot update
 
 - Started implementation planning and preserved the existing dirty planning/documentation baseline.
@@ -132,3 +150,15 @@
 - Isolated live model smoke exited 0 in approximately 9 seconds: modelMemoryFacts=3, modelSkillCreated=true, sdkCatalogLoaded=true, memoryReplay=passed, qqSends=0.
 - Authenticated production job verify-completion-3e73f04 ran 11:58:19.979Z–11:58:21.315Z: completed, NOOP, no error. Lifecycle running, QQ ready, pending memory/outbound zero.
 - Updated docs/HOST_ACCEPTANCE.md with actual deployment SHA, backup and live evidence. Full QQ delivery/process-restart reminder acceptance remains untested. Feature review attempt previously failed with provider 503; do not count it as review approval.
+## 2026-09-15 验证与交付状态
+
+- 已完成实现、文档及静态复核。
+- 已通过：
+  - `corepack pnpm@11.7.0 lint`
+  - `corepack pnpm@11.7.0 typecheck`
+  - `corepack pnpm@11.7.0 build`
+  - 7 个相关测试文件，共 46 个测试
+  - 主机/QQ/runtime 扩大测试范围（排除 production-wake），共 23 个文件、150 个测试
+- 用户已执行修复后的 `production-wake.test.ts`：1 个文件、1 个测试通过，总耗时 3.33 秒。
+- 所有本次更新的自动化验证现已完整通过；进入 commit 与 push 阶段。
+- 已按计划提交并推送当前 `codex/host-completion` 分支，未改写远端历史。

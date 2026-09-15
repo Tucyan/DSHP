@@ -1,5 +1,35 @@
 # Low-resource server deployment
 
+## 2026-09-15 In-turn multi-message delivery
+
+### Goal
+Allow one foreground ReAct task to call a session-bound `send_message(text)` tool multiple times, continue working after each send, and finish without an automatic duplicate reply.
+
+### Active Phases
+- [x] Confirm repository state and preserve the existing feature branch/history.
+- [x] Map the current foreground agent loop, QQ outbound durability, history/memory ingestion, and hidden-action policy.
+- [x] Save the detailed implementation plan and acceptance-to-test mapping.
+- [x] Add focused failing tests for multi-send continuation, ordering/idempotency, final non-duplication, history, and background denial.
+- [x] Implement the minimal tool and delivery lifecycle changes.
+- [x] Run focused and repository verification, review the diff against every acceptance criterion.
+- [x] Commit the verified changes and push the current branch to `origin`.
+
+### Decisions
+- Work on the existing clean `codex/host-completion` branch, which already tracks `origin/codex/host-completion`; do not rewrite prior history.
+- Treat real QQ arrival as an integration-only boundary, matching the user's stated acceptance scope.
+
+### Errors
+- The first planning-file patch used the stale heading `# Progress log`; the actual file starts with `# Web admin progress`. The patch was rejected atomically, then corrected against the inspected heading.
+- A read-only inspection named nonexistent `packages/qq-adapter/src/contracts.ts`; switched to the exported `port.ts` and `durable-port.ts` sources.
+- A PowerShell `rg` command used a wildcard in a Windows path segment and failed for that segment; package discovery will use `rg --files` filtering instead.
+- The first `send_message` output schema used raw JSON Schema `required`/`minLength`, but DSH `defineTool` expects its value-schema DSL with per-property `required: true`. Focused tests exposed this before integration; the schema was corrected to the supported DSL.
+- The first focused Host typecheck found one removed local `isUserOwnedTurn` declaration still needed by memory filtering and a union-narrowing limitation on plugin-augmented Session events. Restored the local and added an explicit narrowed event view; Runtime typecheck already exited 0.
+- The first 151-test focused run had 150 passes and one `production-wake` timeout. Isolated reproduction timed out identically; inspection showed its fake Agent tool catalog omitted the newly required `send_message`, so capability readiness waited until the test deadline. Updated only that fixture catalog.
+- The third and final allowed execution of `production-wake` still timed out. Continued static tracing found the foreground fixture also lacked `systemPrompt.section`, now always used to install immutable delivery guidance; this synchronous setup failure was swallowed by the timer worker and left the fixture Promise unresolved. Added the missing public seam, but per the three-attempt rule did not run this long test a fourth time.
+- The operator ran the corrected `production-wake.test.ts` fixture after the handoff: 1 file / 1 test passed in 3.33 seconds, completing the focused verification evidence.
+- A cleanup patch initially targeted `CompletionTracker` in `bridge.ts`, but that helper lives in `plugin.ts`; the atomic patch was rejected. Re-read the exact location and applied the dead-field cleanup to the correct file.
+- The first repository lint found one now-unused user-turn flag and two test closures declared with `let` despite single assignment. Removed the dead flag and used lexical `const` bridge bindings.
+
 ## 2026-09-09 Model configuration hot update
 
 ### Goal

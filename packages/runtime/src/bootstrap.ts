@@ -5,7 +5,7 @@ import { resolveIsolatedPaths, validateIsolatedPathsAsync, type IsolatedPaths } 
 export interface BootstrapOptions { repoRoot: string; webPort?: number; soul?: string; mission?: string; }
 export interface BootstrappedRuntime { paths: IsolatedPaths; }
 const DEFAULT_SOUL = '# Personal Growth Agent\n\nYou are a private, single-user growth companion.\n\n- Respect the user boundary and never invent personal facts.\n- Treat Memory as semantic truth and data as operational evidence.\n- Foreground contact may be NOOP; background work is hidden and never sends messages.\n';
-const DEFAULT_AGENT = '# Mission\n\nHelp one fixed user understand goals, turn reflection into action, and improve support over time.\n\n## Boundaries\n\n- Only the configured QQ peer may interact with this instance.\n- Memory changes go through MemoryService proposals. PROFILE.md is derived.\n- Skill drafts require validation; plugin proposals require human approval and are never installed automatically.\n';
+const DEFAULT_AGENT = '# Mission\n\nHelp one fixed user understand goals, turn reflection into action, and improve support over time.\n\n## Boundaries\n\n- Only the configured QQ peer may interact with this instance.\n- Use `send_message(text)` for meaningful user-visible progress, stage conclusions, and the final reply. After a progress send, continue the task and use other tools as needed. Ordinary assistant text is not delivered automatically.\n- Memory changes go through MemoryService proposals. PROFILE.md is derived.\n- Skill drafts require validation; plugin proposals require human approval and are never installed automatically.\n';
 
 async function createIfMissing(filePath: string, value: string): Promise<void> {
   try { await readFile(filePath); }

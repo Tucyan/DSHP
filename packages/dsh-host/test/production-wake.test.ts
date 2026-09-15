@@ -26,7 +26,7 @@ describe('production Host wake composition', () => {
     const prompts: string[] = [], sent: string[] = []
     const foregroundId = sessionIdForPeer('fixture-peer')
     const agents = new Map<string, unknown>()
-    const availableTools = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill', process.platform === 'win32' ? 'pwsh' : 'bash']
+    const availableTools = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message', process.platform === 'win32' ? 'pwsh' : 'bash']
     const ready = Promise.withResolvers<void>()
     const completed = Promise.withResolvers<void>()
     const foreground = Promise.withResolvers<void>()
@@ -45,7 +45,10 @@ describe('production Host wake composition', () => {
         async resume(options: { resumeSessionId: string; setup?: (ctx: unknown) => void }) { return this.create({ sessionId: options.resumeSessionId, setup: options.setup }) },
         async create(options: { sessionId: string; setup?: (ctx: unknown) => void }) {
           const id = String(options.sessionId)
-          const ctx = { tools: { restrict() {}, guard() {}, schemas: () => availableTools.map(name => ({ name })) } }
+          const ctx = {
+            tools: { restrict() {}, guard() {}, schemas: () => availableTools.map(name => ({ name })) },
+            systemPrompt: { section() {} },
+          }
           options.setup?.(ctx)
           const agent = { id, ctx, async whenIdle() {}, followup(message: { content: Array<{ text: string }> }) {
             prompts.push(message.content.map(block => block.text).join(''))

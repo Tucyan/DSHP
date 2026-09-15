@@ -10,7 +10,9 @@ describe('runtime bootstrap', () => {
     const first = await bootstrapRuntime({ repoRoot: root });
     expect(await stat(first.paths.dshHome)).toBeTruthy();
     await readFile(path.join(root, 'workspace', 'SOUL.md'), 'utf8');
-    await readFile(path.join(root, 'workspace', 'AGENT.md'), 'utf8');
+    const initialAgent = await readFile(path.join(root, 'workspace', 'AGENT.md'), 'utf8');
+    expect(initialAgent).toContain('send_message')
+    expect(initialAgent).toContain('continue the task')
     const soul = path.join(root, 'workspace', 'SOUL.md');
     const edited = '# human edit\n';
     await (await import('node:fs/promises')).writeFile(soul, edited);

@@ -52,20 +52,21 @@ describe('native DSH user events', () => {
       const foreground = sessionIdForPeer('peer')
       let seq = 0
       const emit = (type: string, data: unknown) => listener?.({ id: foreground }, { type, data, seq: ++seq, time: Date.parse('2026-09-07T12:00:00.000Z') })
-      const turn = (number: number, source: { kind: 'user' } | { kind: 'plugin'; plugin: string }, userText: string, assistantText: string) => {
+      const turn = (number: number, source: { kind: 'user' } | { kind: 'plugin'; plugin: string }, userText: string, assistantText: string, sentTexts: string[] = []) => {
         emit('turn/start', { turn: number })
         emit('user/message', createUserMessage({ source, content: [{ type: 'text', text: userText }] }))
         emit('assistant/message', { turn: number, step: 1, message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: assistantText }] }) })
+        sentTexts.forEach((text, index) => emit('personal-growth/message-sent', { id: `sent-${number}-${index}`, callId: `call-${number}-${index}`, text }))
         emit('turn/end', { turn: number, reason: { kind: 'completed' } })
       }
 
       turn(1, { kind: 'plugin', plugin: 'dsh-schedule' }, 'scheduled prompt', 'scheduled reply')
-      turn(2, { kind: 'user' }, 'direct user prompt', 'direct user reply')
+      turn(2, { kind: 'user' }, 'direct user prompt', 'unsent assistant narration', ['阶段一', '最终结论'])
       await until(() => consumed.length === 2 && wakes.length === 1)
 
       expect(consumed.map(events => events.map(event => (event as { content: string }).content))).toEqual([
         ['scheduled prompt', 'scheduled reply'],
-        ['direct user prompt', 'direct user reply'],
+        ['direct user prompt', '阶段一', '最终结论'],
       ])
       expect(wakes).toHaveLength(1)
     } finally {
