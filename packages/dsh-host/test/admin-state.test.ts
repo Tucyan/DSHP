@@ -52,6 +52,17 @@ describe('admin path safety', () => {
   })
 })
 describe('heartbeat management', () => {
+  it('retains safe action failure codes without exposing provider details', async () => {
+    const { files } = await fixture()
+    const { HiddenActionError } = await import('../src/hidden-action.js')
+    const control = new HeartbeatController(files, { timeZone: 'Asia/Singapore', quietHours: { start: '23:00', end: '07:00' }, cooldownMinutes: 120, maxContactsPerDay: 4 })
+    await control.initialize()
+    control.start(async () => { throw new HiddenActionError('heartbeat_invalid_action') })
+    control.run('background', 'invalid-format')
+    await control.drain()
+    await control.close()
+    expect(control.jobs()[0]).toMatchObject({ status: 'failed', error: 'heartbeat_invalid_action' })
+  })
   it('persists settings and deduplicates manual jobs while returning real outcomes', async () => {
     const { files } = await fixture(); let calls = 0
     const control = new HeartbeatController(files, { timeZone: 'Asia/Singapore', quietHours: { start: '23:00', end: '07:00' }, cooldownMinutes: 120, maxContactsPerDay: 4 })

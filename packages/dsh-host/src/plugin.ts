@@ -11,7 +11,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { AgentActionSchema, assertActionAllowedForTrigger, type AgentAction, type AgentTrigger, appendJsonl, readJsonl, redactTrace } from '@personal-growth/shared'
+import { type AgentAction, type AgentTrigger, appendJsonl, readJsonl, redactTrace } from '@personal-growth/shared'
 import { HeartbeatService, parseHeartbeatConfig, type HeartbeatConfig } from '@personal-growth/personal-heartbeat'
 import { DreamService, HistoryRecordSchema, ProposalSchema } from '@personal-growth/personal-memory'
 import { ExtensionWriter } from '@personal-growth/runtime'
@@ -20,8 +20,15 @@ import { SafeAdminFiles } from './admin/files.js'
 import { PromptStore } from './admin/prompts.js'
 import { HeartbeatController } from './admin/heartbeat.js'
 import { AdminBackend, HostStatus } from './admin/backend.js'
-import { installManagedPrompt, adminSessions, adminSchedule } from './admin/integration.js'
+import { installManagedPrompt, installMessageDeliveryPrompt, adminSessions, adminSchedule } from './admin/integration.js'
+import { createDshModelSettings } from './admin/model-settings.js'
 import { startAdminServer } from './admin/server.js'
+import { requestHiddenAction } from './hidden-action.js'
+import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
+import { executeSkillAction } from './skill-action.js'
+import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
+import { registerSendMessageTool, type SendMessage, type SendMessageToolRegistrar } from './send-message.js'
+export { parseAgentActionJson } from './hidden-action.js'
 
 export const name = 'personal-growth-dsh-host'
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'tools']
@@ -128,15 +135,6 @@ export interface CompletedTurn {
   seq: number
 }
 
-/** Strictly parse model output; markdown wrappers and unknown fields are rejected. */
-export function parseAgentActionJson(raw: string): AgentAction {
-  if (typeof raw !== 'string' || !raw.trim()) throw new Error('Hidden agent returned empty action')
-  const input: unknown = JSON.parse(raw)
-  const parsed = AgentActionSchema.parse(input)
-  if (!input || typeof input !== 'object' || Object.keys(input).length !== Object.keys(parsed).length || Object.keys(input).some(key => !Object.prototype.hasOwnProperty.call(parsed, key))) throw new Error('Hidden agent returned non-strict action JSON')
-  return parsed
-}
-
 export function buildHeartbeatConfig(env: Record<string, string | undefined> = process.env): HeartbeatConfig {
   const numberValue = (name: string, fallback: number): number => {
     const value = env[name]
@@ -167,7 +165,7 @@ export function captureCompletedTurn(events: readonly { seq: number; type: strin
 }
 
 export interface DshToolRegistrar { register(definition: ToolDefinition): () => void }
-export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter; ready?: Promise<void> }
+export interface PersonalGrowthToolPaths { agentsHome: string; proposals: string; memoryApply?: (proposal: unknown) => Promise<unknown>; extensionWriter?: ExtensionWriter; ready?: Promise<void>; sendMessage?: SendMessage }
 
 function safeSlug(value: string): string {
   const slug = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
@@ -180,21 +178,6 @@ function inside(root: string, child: string): string {
   const target = resolve(child)
   if (target !== base && !target.startsWith(`${base}/`) && !target.startsWith(`${base}\\`)) throw new Error('extension path escapes isolated root')
   return target
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map(key => [key, canonicalize((value as Record<string, unknown>)[key])]))
-  }
-  return value
-}
-
-function addHistoryEvidence(historyId: string, proposal: unknown): unknown {
-  const parsed = ProposalSchema.parse(proposal)
-  if (parsed.sourceEvidence.some(evidence => evidence.startsWith('history:') || evidence.startsWith('proposal:'))) throw new Error('Dream proposal contains reserved history/proposal evidence')
-  const fingerprint = createHash('sha256').update(JSON.stringify(canonicalize(parsed)), 'utf8').digest('hex')
-  return ProposalSchema.parse({ ...parsed, sourceEvidence: [...new Set([...parsed.sourceEvidence, `history:${historyId}`, `proposal:${fingerprint}`])] })
 }
 
 function scheduleOccurrenceId(sessionId: string, turn: number): string {
@@ -222,7 +205,7 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
       await paths.ready
       const slug = safeSlug(args.name)
       if (paths.extensionWriter) {
-        const result = await paths.extensionWriter.createSkill({ name: slug, description: `Use when working on ${slug}.`, instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${args.instructions}\n\nStop:\nStop when the requested skill action is complete.`, positiveTriggers: [slug], negativeTriggers: ['unrelated request'] })
+        const result = await executeSkillAction(paths.extensionWriter, { name: slug, description: args.description, instructions: args.instructions })
         return { accepted: true, path: result.path }
       }
       const target = inside(paths.agentsHome, `${paths.agentsHome}/skills/${slug}/SKILL.md`)
@@ -275,6 +258,19 @@ export function registerPersonalGrowthTools(registrar: DshToolRegistrar, paths: 
   return [registrar.register(skill), registrar.register(plugin), registrar.register(memory)]
 }
 
+/** Register the Host delivery override in the foreground Agent scope.
+ * The QQ bundle owns a global send_message; a scoped registration shadows it
+ * without colliding, while hidden Agents never receive this setup callback.
+ */
+export function installForegroundMessageDelivery(ctx: Context, send: SendMessage): () => void {
+  const tools = (ctx as unknown as { tools?: SendMessageToolRegistrar }).tools
+  if (!tools) throw new Error('personal-growth-dsh-host requires public scoped Agent tools')
+  const disposer = registerSendMessageTool(tools, send)
+  const effect = (ctx as unknown as { effect?: (factory: () => () => void) => unknown }).effect
+  effect?.(() => disposer)
+  return disposer
+}
+
 export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
   const selection = (ctx as unknown as { agentDefaultModel?: { currentSelection?: () => DshAgentOptions | undefined } }).agentDefaultModel?.currentSelection?.()
   if (!selection?.provider || !selection.model) throw new Error('personal-growth-dsh-host requires a public DSH default model selection')
@@ -284,24 +280,23 @@ export function resolveDefaultAgentOptions(ctx: Context): DshAgentOptions {
 export const REQUIRED_AGENT_TOOLS = [
   'schedule_create', 'schedule_list', 'schedule_delete',
   'get_goal', 'create_goal', 'update_goal',
-  'read', 'write', 'edit', 'glob', 'grep', 'skill',
+  'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message',
 ] as const
 
 /** Setup callback for the hidden maintenance root; restriction happens before publication. */
 export function createBackgroundAgentSetup(): (agentCtx: Context) => void {
-  return (agentCtx: Context) => {
-    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
-    if (!tools?.restrict) throw new Error('personal-growth-dsh-host requires public tool restriction for background agent')
-    tools.restrict({ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] })
-  }
+  // Maintenance proposes an action; only the Host executes validated effects.
+  return createReadOnlyHiddenAgentSetup()
 }
 
 /** Decision and Dream agents receive only the read-only skill catalog. */
 export function createReadOnlyHiddenAgentSetup(): (agentCtx: Context) => void {
   return (agentCtx: Context) => {
-    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown } }).tools
-    if (!tools?.restrict) throw new Error('personal-growth-dsh-host requires tool restriction for read-only hidden agent')
+    const tools = (agentCtx as unknown as { tools?: { restrict?: (options: { allow: string[] }) => unknown; guard?: (check: (execution: { name: string }) => string | undefined) => unknown } }).tools
+    if (!tools?.restrict || !tools.guard) throw new Error('personal-growth-dsh-host requires tool restriction and guard for read-only hidden agent')
     tools.restrict({ allow: ['skill'] })
+    // Scoped DSH schedule tools survive global restrictions; deny their execution too.
+    tools.guard(execution => execution.name === 'skill' ? undefined : 'hidden_agent_read_only')
   }
 }
 
@@ -323,23 +318,22 @@ function inbound(message: QQBotInboundMessage): BridgeInbound {
 }
 
 interface CompletionTracker {
-  begin(agentId: string, messageId?: string): void
+  begin(agentId: string): void
   has(agentId: string): boolean
   assistant(agentId: string, text: string): void
   complete(agentId: string, ok: boolean, durableTask?: Promise<void>): string | undefined
-  messageId(agentId: string): string | undefined
   wait(agentId: string): Promise<string | undefined>
 }
 
 function completionTracker(): CompletionTracker {
-  const pending = new Map<string, { messageId?: string; text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
+  const pending = new Map<string, { text?: string; promise: Promise<string | undefined>; resolve: (text: string | undefined) => void; reject: (error: unknown) => void }>()
   return {
-    begin(agentId, messageId) {
+    begin(agentId) {
       if (pending.has(agentId)) throw new Error(`agent ${agentId} already has a pending turn`)
       let resolve!: (text: string | undefined) => void
       let reject!: (error: unknown) => void
       const promise = new Promise<string | undefined>((done, fail) => { resolve = done; reject = fail })
-      pending.set(agentId, { messageId, promise, resolve, reject })
+      pending.set(agentId, { promise, resolve, reject })
     },
     has(agentId) { return pending.has(agentId) },
     assistant(agentId, text) {
@@ -356,7 +350,6 @@ function completionTracker(): CompletionTracker {
       } else turn.resolve(text)
       return text
     },
-    messageId(agentId) { return pending.get(agentId)?.messageId },
     wait(agentId) {
       return pending.get(agentId)?.promise ?? Promise.resolve(undefined)
     },
@@ -372,7 +365,8 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
       agent.inject(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'plugin', plugin: 'personal-growth-dsh-host', form: 'snapshot', sections: [{ name: 'context', text: message.text }] } }))
     },
     followup(message) {
-      tracker?.begin(String(agent.id), message.messageId)
+      tracker?.begin(String(agent.id))
+      wrapped.reply = undefined
       agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: { kind: 'user' } }))
     },
     whenIdle: async () => {
@@ -390,20 +384,22 @@ export function createDshAgentRegistry(ctx: Context, tracker?: CompletionTracker
   const persistence = (ctx as unknown as { sessionPersistence?: DshSessionPersistence }).sessionPersistence
   if (!persistence || typeof persistence.listSnapshots !== 'function') throw new Error('personal-growth-dsh-host requires public session persistence.listSnapshots')
   const agents = (ctx as unknown as { agents: { resume(options: { resumeSessionId: SessionId; agentOptions?: DshAgentOptions; setup?: (agentCtx: Context) => void }): Promise<AgentHandle>; create(options: { sessionId: SessionId; agentOptions?: DshAgentOptions; setup?: (agentCtx: Context) => void }): Promise<AgentHandle> } }).agents
-  const model = resolveDefaultAgentOptions(ctx)
-  const agentOptions = { provider: model.provider, model: model.model, ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}) }
+  const agentOptions = () => {
+    const model = resolveDefaultAgentOptions(ctx)
+    return { provider: model.provider, model: model.model, ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}) }
+  }
   return {
     async resume({ sessionId }) {
       const id = SessionId(sessionId)
       const snapshots = await persistence.listSnapshots()
       const exists = snapshots.some(snapshot => String(snapshot.header.id) === sessionId)
       if (!exists) return this.create({ sessionId })
-      const handle = await agents.resume({ resumeSessionId: id, agentOptions, ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
+      const handle = await agents.resume({ resumeSessionId: id, agentOptions: agentOptions(), ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
       try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
     async create({ sessionId }) {
-      const handle = await agents.create({ sessionId: SessionId(sessionId), agentOptions, ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
+      const handle = await agents.create({ sessionId: SessionId(sessionId), agentOptions: agentOptions(), ...(setup ? { setup: (agentCtx: Context) => setup(agentCtx, sessionId) } : {}) })
       try { await waitForCapabilities(handle, assertCapabilities) } catch (error) { await handle.dispose(); throw error }
       return wrapAgent(handle, tracker)
     },
@@ -479,7 +475,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   const memory: BridgeMemory = config.memory ?? {
     readProfile: () => service.readProfile(),
-    search: async (query, limit) => (await service.search(query, limit)).map(document => document.raw),
+    search: async (query, limit) => (await service.search(query, limit)).map(document => `PATH:${document.path}\nHASH:${document.hash}\n${document.raw}`),
     consume: events => service.consume(events),
     readIndex: () => service.readIndex(),
     apply: proposal => service.apply(proposal as Parameters<MemoryService['apply']>[0]),
@@ -490,7 +486,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const tracker = completionTracker()
   const bridgeState = new FileBridgeState(resolve(workspaceRoot, '.personal-growth', 'bridge-state.json'))
   const tracePath = resolve(workspaceRoot, '.personal-growth', 'trace.jsonl')
-  const traceTypes = new Set(['inbound', 'outbound', 'history', 'dream_proposal', 'memory_apply', 'memory_consume', 'memory_recovery', 'heartbeat', 'heartbeat_decision'])
+  const traceTypes = new Set(['inbound', 'outbound', 'history', 'dream_proposal', 'memory_apply', 'memory_consume', 'memory_recovery', 'heartbeat', 'heartbeat_decision', 'model'])
   const appendTrace = async (record: Record<string, unknown>): Promise<void> => {
     status.trace(record)
     if (typeof record.type !== 'string' || !traceTypes.has(record.type)) throw new Error('host trace event is outside allowlist')
@@ -512,6 +508,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   // ExtensionWriter has its own runtime trace schema. Keep it in a separate
   // file so the host trace reader never has to accept two incompatible shapes.
   const extensionWriter = new ExtensionWriter(agentsHome, runtimeRoot, resolve(runtimeRoot, 'extension-trace.jsonl'))
+  let bridge: PersonalGrowthBridge | undefined
   const toolDisposers = registerPersonalGrowthTools(toolRuntime, {
     agentsHome,
     proposals: resolve(runtimeRoot, 'plugin-proposals'),
@@ -521,8 +518,20 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   })
   ctx.effect(() => () => { for (const dispose of toolDisposers) dispose() })
   const hiddenAgents = new Map<string, BridgeAgent>()
+  let hiddenReload: Promise<void> | undefined
+  const reloadHiddenAgents = (): Promise<void> => {
+    if (hiddenReload) return hiddenReload
+    const stale = [...hiddenAgents.values()]
+    hiddenAgents.clear()
+    hiddenReload = Promise.all(stale.map(async agent => {
+      await agent.whenIdle()
+      await agent.dispose?.()
+    })).then(() => undefined).finally(() => { hiddenReload = undefined })
+    return hiddenReload
+  }
   const scheduleCandidates = new Map<string, { text: string }>()
   const getHiddenAgent = async (role: 'decision' | 'dream' | 'maintenance'): Promise<BridgeAgent> => {
+    await hiddenReload
     const sessionId = hiddenSessionId(allowedPeerId, role)
     const existing = hiddenAgents.get(role)
     if (existing) return existing
@@ -543,13 +552,14 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   }
   const dreamService = new DreamService({
     propose: async input => {
-      const raw = await hiddenText('dream', `${INTERNAL_PROMPTS.dream} IGNORE示例: [${JSON.stringify({ action: 'IGNORE', reason: 'no reliable change', sourceEvidence: ['dream:no-change'] })}]。HISTORY:\n${JSON.stringify(input.newHistory)}\nPROFILE:\n${input.profile}\nINDEX:\n${input.index}\nRELEVANT MEMORY:\n${input.relevantMemories.join('\n')}`)
+      const raw = await hiddenText('dream', `${INTERNAL_PROMPTS.dream}\n${DREAM_PROPOSAL_CONTRACT}\nHISTORY:\n${JSON.stringify(input.newHistory)}\nPROFILE:\n${input.profile}\nINDEX:\n${input.index}\nRELEVANT MEMORY:\n${input.relevantMemories.join('\n')}`)
       const parsed = JSON.parse(raw)
       if (!Array.isArray(parsed)) throw new Error('hidden dream agent must return a JSON proposal array')
       return parsed
     },
   })
   const dreamAdapter: BridgeDream = dream ?? { propose: input => dreamService.dream(input) }
+  const dreamBatches = new DreamBatchStore(workspaceRoot)
   const consumeDurableMemoryTurn = async (key: string, sessionId: string, initial: ConversationEvent[]): Promise<void> => {
     let events = initial
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -579,21 +589,44 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         if (trigger.type === 'foreground_heartbeat') {
           const candidate = scheduleCandidates.get(trigger.occurrenceId)
           if (candidate) return { type: 'MESSAGE_USER', text: candidate.text, importance: 'normal' }
-          const profile = await memory.readProfile()
-          const relevant = await memory.search('recent goals progress follow-up', 8)
-          const raw = await hiddenText('decision', `${INTERNAL_PROMPTS.decision}PROFILE:\n${profile}\nRELEVANT MEMORY:\n${relevant.join('\n')}\n触发:${trigger.occurrenceId}`)
-          return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
+          const sessionId = sessionIdForPeer(allowedPeerId)
+          const context = await buildHeartbeatContext({
+            identity: async () => {
+              if (adminEnabled) { const value = prompts.view(); return { soul: value.soul.text, mission: value.mission.text } }
+              return { soul: await adminFiles.read('workspace/SOUL.md'), mission: await adminFiles.read('workspace/AGENT.md') }
+            },
+            profile: () => memory.readProfile(),
+            memories: () => memory.search('recent goals progress follow-up', 8),
+            recent: async () => {
+              const exists = (await ctx.sessionPersistence.listSnapshots()).some(item => String(item.header.id) === sessionId)
+              if (!exists) return []
+              return recentUserConversation((await ctx.sessionPersistence.inspect(SessionId(sessionId))).events)
+            },
+            goal: async () => {
+              if (!bridge) throw new Error('foreground_unavailable')
+              await bridge.ensureForeground()
+              const agent = ctx.agents.get(SessionId(sessionId))
+              const goals = (ctx as unknown as { goals?: { get(agent: Agent): unknown } }).goals
+              if (!agent || !goals) throw new Error('goal_unavailable')
+              return goals.get(agent) ?? null
+            },
+            schedules: async () => await adminSchedule(ctx, sessionId, async () => undefined)('list', {}) as unknown[],
+            lastContact: async () => (await heartbeatService.ledger.read()).contacts.map(item => item.at).sort().at(-1) ?? null,
+          }, { at: trigger.at, timeZone: heartbeatService.config.timeZone, triggerId: trigger.occurrenceId })
+          await appendTrace({ type: 'heartbeat', at: trigger.at, key: trigger.occurrenceId, status: context.ready ? 'context_ready' : 'context_unavailable', reason: context.sources.filter(item => item.status !== 'available').map(item => item.name).join(',') || (context.truncated ? 'context_truncated' : 'context_complete') })
+          if (!context.ready) return { type: 'NOOP', reason: '必要上下文暂不可用，本轮不主动联系' }
+          return requestHiddenAction('decision', trigger, `${INTERNAL_PROMPTS.decision}\n${context.prompt}`, prompt => hiddenText('decision', prompt))
         }
         const historyResult = await readJsonl(service.paths.history, HistoryRecordSchema)
         if (historyResult.errors.length) throw new Error('Malformed memory history')
         const pending = []
-        const maintenanceProfile = await memory.readProfile()
-        const maintenanceIndex = await memory.readIndex()
-        const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
+        let failures = 0
+        let processed = 0
         for (const record of historyResult.records) {
           const claimed = await bridgeState.claimHistory?.(record.id) ?? true
           await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: claimed ? 'claimed' : 'already-claimed' })
           if (!claimed) continue
+          if (processed++ >= 10) { await bridgeState.failHistory(record.id); break }
           let lost = false
           let renewalInFlight: Promise<void> | undefined
           const renew = () => {
@@ -608,33 +641,34 @@ export function apply(ctx: Context, config: DshHostConfig): void {
           }
           const renewal = setInterval(renew, 10_000)
           try {
-            const proposals = await dreamAdapter.propose({ newHistory: [record], profile: maintenanceProfile, index: maintenanceIndex, relevantMemories: maintenanceRelevant })
-            if (lost) throw new Error('history lease lost during dream')
-            const parsedProposals = proposals.map(proposal => ProposalSchema.parse(proposal))
-            const mutations = parsedProposals.filter(proposal => proposal.action !== 'IGNORE')
-            if (mutations.length > 1) throw new Error(`Dream returned multiple mutations for history ${record.id}`)
-            const selected = mutations[0] ?? parsedProposals[0]
-            await appendTrace({ type: 'dream_proposal', at: new Date().toISOString(), key: record.id, status: selected ? 'received' : 'empty' })
-            if (selected) {
-              const withEvidence = addHistoryEvidence(record.id, selected)
-              await memory.apply(withEvidence)
+            await dreamBatches.run(record.id, async () => {
+              const proposals = await dreamAdapter.propose({ newHistory: [record], profile: await memory.readProfile(), index: await memory.readIndex(), relevantMemories: await memory.search(record.summary.slice(0, 500), 8) })
+              if (lost) throw new Error('history lease lost during dream')
+              await appendTrace({ type: 'dream_proposal', at: new Date().toISOString(), key: record.id, status: 'received' })
+              return proposals
+            }, async proposal => {
+              if (lost) throw new Error('history lease lost before memory apply')
+              await memory.apply(proposal)
               if (lost) throw new Error('history lease lost during memory apply')
               await appendTrace({ type: 'memory_apply', at: new Date().toISOString(), key: record.id, status: 'completed' })
-            }
+            })
             await bridgeState.completeHistory?.(record.id)
             await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'completed' })
             pending.push(record)
-          } catch (error) {
+          } catch {
             await bridgeState.failHistory?.(record.id)
             await appendTrace({ type: 'history', at: new Date().toISOString(), key: record.id, status: 'failed' })
-            throw error
+            failures++
           } finally {
             clearInterval(renewal)
             await renewalInFlight?.catch(() => undefined)
           }
         }
-        const raw = await hiddenText('maintenance', `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`)
-        return assertActionAllowedForTrigger(trigger, parseAgentActionJson(raw))
+        if (failures) throw new Error('heartbeat_memory_batch_failed')
+        const maintenanceProfile = await memory.readProfile()
+        const maintenanceIndex = await memory.readIndex()
+        const maintenanceRelevant = await memory.search('capability gap skill improvement', 8)
+        return requestHiddenAction('maintenance', trigger, `${INTERNAL_PROMPTS.maintenance}HISTORY_COUNT:${pending.length}\nNEW_HISTORY:\n${JSON.stringify(pending)}\nPROFILE:\n${maintenanceProfile}\nINDEX:\n${maintenanceIndex}\nRELEVANT:\n${maintenanceRelevant.join('\n')}`, prompt => hiddenText('maintenance', prompt))
       },
     },
     sink: { append: async record => { await appendTrace({ type: 'heartbeat_decision', ...record }) } },
@@ -663,8 +697,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       const result = await heartbeatService.wakeBackground({ occurrenceId: input.occurrenceId, at: input.at })
       const action = result.action
       if (action?.type === 'CREATE_SKILL') {
-        const slug = safeSlug(action.name)
-        await extensionWriter.createSkill({ name: slug, description: `Use when working on ${slug}.`, instructions: `Input:\nUser context supplied by the Agent.\n\nOutput:\n${action.instructions}\n\nStop:\nStop when the requested skill action is complete.`, positiveTriggers: [slug], negativeTriggers: ['unrelated request'] })
+        await executeSkillAction(extensionWriter, { ...action, name: safeSlug(action.name) })
       } else if (action?.type === 'PROPOSE_PLUGIN') {
         await extensionWriter.proposePlugin({ name: safeSlug(action.name), capabilityGap: action.capabilityGap, design: action.design })
       }
@@ -675,8 +708,15 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const tools = (agent.ctx as unknown as { tools?: { schemas?: (scope?: unknown) => readonly { name: string }[] } }).tools
     const schemas = tools?.schemas?.(agent) ?? []
     assertRequiredAgentTools(schemas.map(schema => schema.name))
-  }, adminEnabled ? (agentCtx, id) => installManagedPrompt(agentCtx, id, prompts) : undefined)
-  let bridge: PersonalGrowthBridge | undefined
+  }, (agentCtx, id) => {
+    installForegroundMessageDelivery(agentCtx, async input => {
+      await pathValidation
+      if (!bridge) throw new Error('send_message is unavailable before the foreground bridge starts')
+      return bridge.sendActiveMessage(input)
+    })
+    installMessageDeliveryPrompt(agentCtx)
+    if (adminEnabled) installManagedPrompt(agentCtx, id, prompts)
+  })
   const dispatchScheduleCandidate = async (sessionId: string, turn: number, text: string, at: string): Promise<void> => {
     await pathValidation
     const occurrenceId = scheduleOccurrenceId(sessionId, turn)
@@ -691,14 +731,28 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const activeTurns = new Map<string, number>()
   const maintenanceTasks = new Set<Promise<unknown>>()
   const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
+    const userData = events.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
+    const source = userData?.source ?? userData?.message?.source
+    const isUserOwnedTurn = source?.kind === 'user'
+    const hasSentMessages = events.some(event => event.type === 'personal-growth/message-sent')
+    const sentIds = new Set<string>()
     const messages: Array<{ role: 'user' | 'assistant'; content: string; at: string }> = []
     for (const event of events) {
+      if (event.type === 'personal-growth/message-sent') {
+        const data = event.data as { id?: string; text?: string }
+        if (typeof data.id === 'string' && typeof data.text === 'string' && data.text.trim() && !sentIds.has(data.id)) {
+          sentIds.add(data.id)
+          messages.push({ role: 'assistant', content: data.text, at: new Date().toISOString() })
+        }
+        continue
+      }
       if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
       const data = event.data as { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }>; message?: { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }> } }
       const message = event.type === 'user/message' ? (Array.isArray(data.content) ? data : data.message) : data.message
       const content = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
       const source = message?.source
       const isInjectedSnapshot = source?.kind === 'plugin' && source.plugin === name && source.form === 'snapshot'
+      if (event.type === 'assistant/message' && isUserOwnedTurn && hasSentMessages) continue
       if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && isInjectedSnapshot)) continue
       messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
     }
@@ -765,7 +819,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
     const userData = eventsForTurn.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
     const source = userData?.source ?? userData?.message?.source
     const isScheduleTurn = source?.kind === 'plugin' && source.plugin !== name && /schedule/i.test(source.plugin ?? '')
-    const isUserOwnedTurn = source?.kind === 'user'
     const memoryTask = completed && sessionId === foregroundSessionId
       ? pathValidation.then(() => consumeStandaloneTurn(sessionId, eventsForTurn, `${sessionId}:turn:${event.data.turn}`))
       : undefined
@@ -773,13 +826,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       maintenanceTasks.add(memoryTask)
       void memoryTask.finally(() => maintenanceTasks.delete(memoryTask)).catch(() => undefined)
     }
-    const userMessageId = tracker.messageId(sessionId)
     const text = tracker.complete(sessionId, completed, memoryTask)
-    if (completed && bridge && isUserOwnedTurn && (captured?.text ?? text)?.trim() && sessionId === sessionIdForPeer(allowedPeerId)) {
-      void bridge.observeActiveUserReply({ sessionId, text: captured?.text ?? text!, seq: captured?.seq ?? event.seq, completed: true, messageId: userMessageId, at: new Date(event.time).toISOString() }).catch(() => {
-        void appendTrace({ type: 'outbound', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'observe_failure' }).catch(() => undefined)
-      })
-    }
     if (completed && isScheduleTurn && (captured?.text ?? text)?.trim() && sessionId === foregroundSessionId) {
       void dispatchScheduleCandidate(sessionId, event.data.turn, captured?.text ?? text!, new Date(event.time).toISOString()).catch(() => {
         void appendTrace({ type: 'heartbeat', at: new Date().toISOString(), key: sessionId, status: 'failure', reason: 'schedule_policy_failure' }).catch(() => undefined)
@@ -801,10 +848,20 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       status.lifecycle = 'running'
       if (adminEnabled) {
         control.start((role, occurrenceId) => role === 'foreground' ? bridge!.runForegroundWake({ occurrenceId, importance: 0 }) : heartbeat.wakeBackground({ occurrenceId }), settings => { Object.assign(heartbeatService.config, settings.policy) })
+        const models = createDshModelSettings(ctx as never, async selection => {
+          status.model = selection
+          try {
+            await Promise.all([bridge!.reloadForeground(), reloadHiddenAgents()])
+            await appendTrace({ type: 'model', at: new Date().toISOString(), status: 'reloaded' })
+          } catch {
+            await appendTrace({ type: 'model', at: new Date().toISOString(), status: 'reload_failed', reason: 'restart_required' }).catch(() => undefined)
+          }
+        })
         const backend = new AdminBackend({ files: adminFiles, memory: service, prompts, heartbeat: control, status,
           sessionIds: [sessionIdForPeer(allowedPeerId), ...(['decision', 'dream', 'maintenance'] as const).map(role => hiddenSessionId(allowedPeerId, role))],
           sessions: adminSessions(ctx), schedule: adminSchedule(ctx, sessionIdForPeer(allowedPeerId), () => bridge!.ensureForeground()),
           pending: async () => ({ memory: (await bridgeState.listPendingMemoryTurns()).length, outbound: (await bridgeState.listPendingOutbound()).length }),
+          models,
           internalPrompts: INTERNAL_PROMPTS, secrets: [appSecret, process.env.DEEPSEEK_API_KEY ?? ''],
         })
         adminServer = await startAdminServer({ repoRoot: hostPaths.repoRoot, runtimeRoot, assetsRoot: resolve(hostPaths.repoRoot, 'packages/admin-web/dist'), port: config.admin ? config.admin.port : 3182, backend })
@@ -828,6 +885,6 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       await initialRecovery.finally(() => maintenanceTasks.delete(initialRecovery))
     })()
     void started.catch(error => { process.nextTick(() => { throw error }) })
-    return async () => { disposed = true; status.lifecycle = 'stopping'; if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await started.catch(() => undefined); await adminServer?.close(); await control.close(); await bridge?.stop(); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined; status.lifecycle = 'stopped'; status.qq = 'stopped' }
+    return async () => { disposed = true; status.lifecycle = 'stopping'; if (memoryRecoveryTimer) clearInterval(memoryRecoveryTimer); await started.catch(() => undefined); await adminServer?.close(); await control.close(); await bridge?.stop(); await hiddenReload?.catch(() => undefined); await Promise.allSettled([...maintenanceTasks]); await Promise.all([...hiddenAgents.values()].map(agent => agent.dispose?.())); hiddenAgents.clear(); bridge = undefined; status.lifecycle = 'stopped'; status.qq = 'stopped' }
   })
 }

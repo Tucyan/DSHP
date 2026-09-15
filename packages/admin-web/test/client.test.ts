@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { date, mergeEvents, promptDifference, safeMessage } from '../src/model.js'
+import { date, mergeEvents, normalizeModelSelection, promptDifference, safeMessage } from '../src/model.js'
 describe('admin presentation model', () => {
   it('formats native DSH numeric timestamps as well as ISO strings', () => {
     const timestamp = Date.parse('2026-09-07T12:00:00Z')
@@ -17,5 +17,10 @@ describe('admin presentation model', () => {
   })
   it('shows old and new prompt lines without claiming unchanged text is modified', () => {
     expect(promptDifference('a\nb', 'a\nc')).toEqual([{ before: 'b', after: 'c', line: 2 }])
+  })
+  it('normalizes model settings without accepting blank identifiers', () => {
+    expect(normalizeModelSelection({ provider: ' deepseek-official ', model: ' deepseek-v4.1-flash-expires-on-0910 ', reasoningEffort: ' high ' })).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4.1-flash-expires-on-0910', reasoningEffort: 'high' })
+    expect(normalizeModelSelection({ provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: '   ' })).toEqual({ provider: 'deepseek-official', model: 'deepseek-chat' })
+    expect(() => normalizeModelSelection({ provider: ' ', model: 'deepseek-chat', reasoningEffort: '' })).toThrow('模型提供方和模型 ID 不能为空')
   })
 })

@@ -7,6 +7,11 @@ import type { PromptStore } from './prompts.js'
 import { AdminError } from './files.js'
 import type { AdminSessions } from './backend.js'
 import { randomUUID } from 'node:crypto'
+import { MESSAGE_DELIVERY_PROMPT } from '../send-message.js'
+
+export function installMessageDeliveryPrompt(ctx: Context) {
+  ctx.systemPrompt.section({ name: 'deployment:message-delivery', order: 10, text: MESSAGE_DELIVERY_PROMPT })
+}
 
 export function installManagedPrompt(ctx: Context, id: string, prompts: PromptStore) {
   prompts.beginTurn(id)

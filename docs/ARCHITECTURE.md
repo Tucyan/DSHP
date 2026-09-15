@@ -31,7 +31,7 @@ history.jsonl -> DreamProposal -> MemoryService -> Memory Tree
 - `@personal-growth/dsh-adapter`: isolated paths, DSH launch arguments, session/schedule interfaces, bundle/profile helpers.
 - `@personal-growth/qq-adapter`: single-user gate and durable inbox/outbox port used by the local Runtime; production Host uses the same single-user invariants with Tencent QQBot WebSocket.
 - `@personal-growth/runtime`: composition root, local deterministic model, end-to-end demo, operational state.
-- `@personal-growth/dsh-host`: production DSH/QQ composition, hidden agents, durable bridge state, session-event Memory pipeline, proactive policy gate.
+- `@personal-growth/dsh-host`: production DSH/QQ composition, session-bound `send_message(text)` delivery, hidden agents, durable bridge state, session-event Memory pipeline, proactive policy gate.
 
 ## Storage ownership
 
@@ -78,6 +78,8 @@ runtime/
 7. Credentials are environment references and never enter traces, memory, or committed files.
 8. Live inbound completion occurs only after its durable Memory turn succeeds; a failed turn remains recoverable.
 9. Foreground proactive output is sent only after Heartbeat policy admission; ordinary QQ replies must belong to the currently active authorized inbound message.
+10. A foreground user task reaches QQ only through `send_message(text)`. The recipient is fixed by the active session, never supplied by the model; each tool `callId` maps to one durable outbound identity, and retries reuse it.
+11. Confirmed sends append one `personal-growth/message-sent` session event. Memory consumes those exact bodies once, while hidden Agents remain unable to call the delivery tool. A normal assistant text at turn end is not forwarded automatically.
 
 ## Heartbeat v0.1 trust boundary
 

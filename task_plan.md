@@ -1,5 +1,85 @@
 # Low-resource server deployment
 
+## 2026-09-15 Deploy in-turn message delivery
+
+### Goal
+Deploy commit `d17eed5` to the existing Alibaba Cloud DSHP service without changing Nginx, then verify the deployed revision, bounded build, systemd health, QQ readiness, private admin binding, and pending durable queues.
+
+### Active Phases
+- [x] Recover prior deployment context and confirm the local branch is clean at the pushed revision.
+- [ ] Re-read the checked-in Linux deployment contract and inspect the server state without mutation.
+- [ ] Transfer/update the server repository to exactly `d17eed5` using the least risky available route.
+- [ ] Run the low-memory bounded build and restart the DSHP systemd service with recovery protection.
+- [ ] Verify deployed SHA, service health/logs, QQ readiness, loopback admin binding, queue state, and unchanged Nginx.
+
+### Decisions
+- Preserve the existing production environment and credentials; never display or rewrite secret values.
+- Do not edit/reload Nginx or run server tests.
+- Prefer the previously successful Git bundle route if GitHub pull is still unreliable.
+- Limit any long-running, download, permission, or timeout-prone command to at most three attempts, changing the approach after each failure.
+
+## 2026-09-15 In-turn multi-message delivery
+
+### Goal
+Allow one foreground ReAct task to call a session-bound `send_message(text)` tool multiple times, continue working after each send, and finish without an automatic duplicate reply.
+
+### Active Phases
+- [x] Confirm repository state and preserve the existing feature branch/history.
+- [x] Map the current foreground agent loop, QQ outbound durability, history/memory ingestion, and hidden-action policy.
+- [x] Save the detailed implementation plan and acceptance-to-test mapping.
+- [x] Add focused failing tests for multi-send continuation, ordering/idempotency, final non-duplication, history, and background denial.
+- [x] Implement the minimal tool and delivery lifecycle changes.
+- [x] Run focused and repository verification, review the diff against every acceptance criterion.
+- [x] Commit the verified changes and push the current branch to `origin`.
+
+### Decisions
+- Work on the existing clean `codex/host-completion` branch, which already tracks `origin/codex/host-completion`; do not rewrite prior history.
+- Treat real QQ arrival as an integration-only boundary, matching the user's stated acceptance scope.
+
+### Errors
+- The first planning-file patch used the stale heading `# Progress log`; the actual file starts with `# Web admin progress`. The patch was rejected atomically, then corrected against the inspected heading.
+- A read-only inspection named nonexistent `packages/qq-adapter/src/contracts.ts`; switched to the exported `port.ts` and `durable-port.ts` sources.
+- A PowerShell `rg` command used a wildcard in a Windows path segment and failed for that segment; package discovery will use `rg --files` filtering instead.
+- The first `send_message` output schema used raw JSON Schema `required`/`minLength`, but DSH `defineTool` expects its value-schema DSL with per-property `required: true`. Focused tests exposed this before integration; the schema was corrected to the supported DSL.
+- The first focused Host typecheck found one removed local `isUserOwnedTurn` declaration still needed by memory filtering and a union-narrowing limitation on plugin-augmented Session events. Restored the local and added an explicit narrowed event view; Runtime typecheck already exited 0.
+- The first 151-test focused run had 150 passes and one `production-wake` timeout. Isolated reproduction timed out identically; inspection showed its fake Agent tool catalog omitted the newly required `send_message`, so capability readiness waited until the test deadline. Updated only that fixture catalog.
+- The third and final allowed execution of `production-wake` still timed out. Continued static tracing found the foreground fixture also lacked `systemPrompt.section`, now always used to install immutable delivery guidance; this synchronous setup failure was swallowed by the timer worker and left the fixture Promise unresolved. Added the missing public seam, but per the three-attempt rule did not run this long test a fourth time.
+- The operator ran the corrected `production-wake.test.ts` fixture after the handoff: 1 file / 1 test passed in 3.33 seconds, completing the focused verification evidence.
+- A cleanup patch initially targeted `CompletionTracker` in `bridge.ts`, but that helper lives in `plugin.ts`; the atomic patch was rejected. Re-read the exact location and applied the dead-field cleanup to the correct file.
+- The first repository lint found one now-unused user-turn flag and two test closures declared with `let` despite single assignment. Removed the dead flag and used lexical `const` bridge bindings.
+
+## 2026-09-09 Model configuration hot update
+
+### Goal
+Move the Host model selection into a durable project configuration file and allow authenticated administrators to update it from the management page without restarting the service.
+
+### Active Phases
+- [x] Map the DSH model-selection lifecycle and define the durable/hot-update boundary.
+- [x] Write focused failing tests for configuration initialization, atomic update, conflict handling, and new-Agent selection.
+- [x] Implement the model configuration store and runtime selector.
+- [x] Add authenticated admin API and management-page editor.
+- [x] Run focused tests, full verification, and document operational semantics.
+- [x] Commit/push the verified branch and deploy the target model configuration to production.
+
+### Decisions
+- The project configuration file is the persistent source of truth; a successful admin save writes it atomically and updates the in-memory selector in the same operation.
+- Existing in-flight model calls retain the model captured when their Agent was created. New Agent instances use the newly selected model, avoiding mid-turn mutation.
+- API keys remain environment-only and are never exposed or written by the model settings page.
+- Local completion is followed by commit/push and bounded low-resource server deployment; production selection must be `deepseek-v4.1-flash-expires-on-0910`.
+
+### Errors
+- Agent factory package inspection guessed `dsh-agent-instance` from a truncated pnpm directory name, but that directory actually contained `dsh-agent-instructions`; no file was changed. Switched to package-manifest discovery instead of repeating the guessed path.
+- Broad pnpm manifest discovery used PowerShell's reserved automatic `$Matches` variable as an array and failed before producing results. This inspection path is abandoned; implementation will rely on the already verified public DSH type declarations instead of a third broad scan.
+- The first full baseline command exceeded the 30-second execution window after reporting only passing tests. It was not repeated unchanged; the relevant Host/admin baseline was run separately and passed 19 files / 113 tests.
+- The first plugin wiring patch used stale import adjacency and was rejected before changing the file. Re-read the exact anchors and applied the scoped patch successfully.
+- The first frontend test patch used a guessed test title and was rejected before changing the file. Re-read the small test file and applied it against the actual title.
+- The browser session lost Codex authorization after the quota interruption, so the already verified desktop view could not be reused for a mobile screenshot. No browser retry loop or dependency download was attempted; responsive behavior remains covered by the existing CSS breakpoint and production build.
+- The first post-interruption HTTP smoke found the interrupted fixture process gone; after one fixture restart, the first request omitted the required Origin header and failed closed. The corrected authenticated request then passed without touching production data.
+- The first explicit staging command contained a mistyped `dsh-host` path and failed before the commit. Re-ran staging with the verified path list; no files were lost or reverted.
+- First server start on the feature commit exposed a real Cordis injection failure: direct `ctx.settings` access is forbidden without a declared injection. The service was stopped after the redacted log confirmed the cause; Nginx remained active. A regression test now requires the same `ctx.get("settings")` access used by DSH itself.
+- Two local diagnostic invocations contained malformed workspace/test paths; one did not launch and one matched no tests. Both were corrected before accepting evidence; the correctly targeted regression produced the intended RED failure.
+- The first two server build invocations failed before compilation because non-login SSH first lacked `corepack` in PATH, then its shebang selected system Node 12. The service recovery trap worked both times. Pinning Node 24 in PATH made the bounded build pass on the third attempt.
+
 ## Goal
 Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server, preserve the existing Nginx service, keep the admin listener private, and leave a documented environment file for the user to populate.
 
@@ -8,7 +88,7 @@ Deploy the committed DSHP service to the user's 2-core/2GB Alibaba Cloud server,
 - [x] Inspect server OS, memory, disk, Node tooling, current listeners, Nginx, and service manager without changing state.
 - [x] Add only deployment changes required for low-memory operation and private admin access; verify locally and push.
 - [x] Install or update the app on the server with bounded resource settings and a protected environment file.
-- [ ] Start under the available service manager and verify health, logs, reboot policy, Nginx continuity, and port exposure. (credentials populated; Schedule module-resolution fix pending deployment)
+- [x] Start under systemd and verify health, logs, reboot policy, Nginx continuity, and port exposure. Running at 6095aa5; QQ ready and private admin verified.
 
 ## Deployment Decisions
 - Do not edit or reload Nginx unless inspection proves a change is required; the admin page must not take ports 80/443.
@@ -54,3 +134,54 @@ Implement the approved localhost, token-protected real Host administration UI: s
 - Inspection of nonexistent heartbeat config.ts: correct source is contact-policy.ts.
 - Real QQ startup: management HTTP started, Tencent request failed EACCES; no restricted-network retry. Live operator validation remains required.
 - First full verify stopped in lint on disposable browser fixture build assets; narrow runtime/admin ignore added. No command timeout.
+
+## 2026-09-07 SSH deployment continuation
+- [x] Confirm local changes and remote 18fd337, inactive DSHP, active Nginx, env mode 0600.
+- [x] Verify and push Linux path fix (including POSIX case boundary regression).
+- [x] Pull/build/start once; diagnose actual logs and verify private admin and stable service.
+- Long commands/downloads/permission failures: one attempt; hand timeout execution to user.
+- RED: POSIX case boundary test fails because canonical helper lowercases Linux paths.
+
+- [x] Verified path fix: 12 files / 86 tests, lint, host tsc build, diff check; pushed 6095aa5.
+- [x] Operator completed remote git pull to 6095aa5 after bounded automated attempts timed out.
+- Read-only follow-up confirms remote still 18fd337, DSHP inactive/dead, Nginx active, no pull/build process. Build/start not reached.
+
+- Git network troubleshooting authorized: baseline HTTP/2 response stall, then HTTP/1.1 pull stalls before TCP connection, both bounded timeouts. Config changes applied locally with backup, connectivity remains blocked; no automatic retry.
+
+## Native shell failure
+- [x] Reproduce exact foreground capability failure without QQ sends: pwsh missing while bash registered.
+- [x] TDD fix and push 7093184 (87 tests/lint/tsc build).
+- [ ] Deploy 7093184: single remote pull hit its 60s bound with no output; no retry. Operator must pull manually.
+- [ ] Repeat no-message agent initialization diagnostic after deployment; then operator QQ reply acceptance.
+
+- [x] Operator pulled 7093184; server bounded host build passed.
+- [x] Same no-message foreground resume diagnostic now passes required tools (bash=true) and agent_initialization=ok, exit 0; service restored.
+- [ ] Operator QQ end-to-end reply acceptance remains.
+
+## 2026-09-08 正式 Host 修复计划
+- [x] 对照代码确定 Skill / Heartbeat context / multi-fact Memory 三项边界。
+- [x] 保存执行计划：docs/superpowers/plans/2026-09-08-host-completion.md。
+- [ ] Task 0 基线与锁定 SDK 数据接口。
+- [ ] Task 1 正式 Skill 创建/发现/调用组合回归。
+- [ ] Task 2 固定主会话的完整心跳上下文。
+- [ ] Task 3 可持久恢复的多事实批次与逐项去重。
+- [ ] Task 4 正式 Host 集成、全量验证、Linux smoke。
+- [ ] Task 5 服务器受限构建、发布及回滚准备。
+- [ ] Task 6 真实 QQ/模型/重启验收。
+- 本轮只制定计划，未修改业务代码、未连接服务器。
+
+## 2026-09-08 completion deployment verified
+- [x] Tasks 0–5: SDK interfaces, Skill creation/catalog, full heartbeat context, recoverable multi-fact memory, local integration and server deployment completed at 3e73f04.
+- [x] Local lint/typecheck/build and serial 67-file / 330-test run passed before deployment; server bounded build and offline smoke exited 0.
+- [x] Server isolated real-model smoke: 3 memory facts, Skill creation/public catalog load, reopened replay without duplication, zero QQ sends.
+- [x] Production background heartbeat verify-completion-3e73f04 completed NOOP without error at 2026-09-08T11:58:21.315Z; lifecycle running, QQ ready, queues empty.
+- [ ] Task 6 remaining boundary: user QQ delivery and reminder delivery across a process restart have not been exercised; requires user-triggered input or explicit test-message authorization.
+- This update supersedes the earlier unchecked implementation/deployment entries, while retaining historical records.
+
+## 2026-09-15 deployment completed after recovery
+- [x] Inspected server and existing stopped-service backup.
+- [x] Fixed global QQ send_message collision with foreground scoped registration (dc3a9c9).
+- [x] Verified local build/lint/8 focused tests, pushed fix, transferred bundle and fast-forwarded server.
+- [x] Bounded server build and service restart; authenticated QQ readiness and empty queues verified.
+- [x] Confirmed private listener, credential mode and unchanged Nginx.
+- Real QQ message delivery remains a user acceptance check.

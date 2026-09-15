@@ -6,7 +6,7 @@ import { PersonalGrowthBridge, sessionIdForPeer } from '../src/bridge.js'
 import { createDshAgentRegistry } from '../src/plugin.js'
 import { SafeAdminFiles } from '../src/admin/files.js'
 import { PromptStore } from '../src/admin/prompts.js'
-import { adminSchedule, adminSessions, installManagedPrompt } from '../src/admin/integration.js'
+import { adminSchedule, adminSessions, installManagedPrompt, installMessageDeliveryPrompt } from '../src/admin/integration.js'
 
 describe('admin Host integration', () => {
   it('uses read-only persistence for browsing and official fixed-session tools for schedule writes', async () => {
@@ -52,5 +52,13 @@ describe('admin Host integration', () => {
       await registry.create({ sessionId: sessionIdForPeer('peer') })
       expect(setupRan).toBe(true); expect(sections).toContainEqual(expect.objectContaining({ text: '{{personal_growth_identity}}' })); expect(value?.()).toContain('MISSION')
     } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  it('installs immutable guidance for intermediate and final sends without automatic text delivery', () => {
+    const sections: Array<{ name: string; text: string }> = []
+    installMessageDeliveryPrompt({ systemPrompt: { section(value: { name: string; text: string }) { sections.push(value) } } } as never)
+    expect(sections).toHaveLength(1)
+    expect(sections[0]).toMatchObject({ name: 'deployment:message-delivery' })
+    expect(sections[0]!.text).toContain('After a progress send, continue the task')
+    expect(sections[0]!.text).toContain('Ordinary assistant text is not delivered automatically')
   })
 })

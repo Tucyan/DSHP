@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { apply, assertRequiredAgentTools, createDshAgentRegistry, isCanonicalPathWithin, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, type DshSessionPersistence } from '../src/plugin.js'
+import { apply, assertRequiredAgentTools, createDshAgentRegistry, isCanonicalPathWithin, normalizeHostPaths, resolveDefaultAgentOptions, createBackgroundAgentSetup, createReadOnlyHiddenAgentSetup, REQUIRED_AGENT_TOOLS, type DshSessionPersistence } from '../src/plugin.js'
 import { join, resolve } from 'node:path'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 describe('production DSH host adapter', () => {
   it('requires the native shell tool on each platform', () => {
-    const common = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill']
+    const common = ['schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal', 'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message']
     expect(() => assertRequiredAgentTools([...common, 'bash'], 'linux')).not.toThrow()
     expect(() => assertRequiredAgentTools([...common, 'bash'], 'darwin')).not.toThrow()
     expect(() => assertRequiredAgentTools([...common, 'pwsh'], 'win32')).not.toThrow()
@@ -18,8 +18,9 @@ describe('production DSH host adapter', () => {
     expect(() => assertRequiredAgentTools(['read', 'write', 'edit'])).toThrow(/schedule_create/)
     expect(() => assertRequiredAgentTools([
       'schedule_create', 'schedule_list', 'schedule_delete', 'get_goal', 'create_goal', 'update_goal',
-      'read', 'write', 'edit', 'glob', 'grep', 'skill', process.platform === 'win32' ? 'pwsh' : 'bash',
+      'read', 'write', 'edit', 'glob', 'grep', 'skill', 'send_message', process.platform === 'win32' ? 'pwsh' : 'bash',
     ])).not.toThrow()
+    expect(REQUIRED_AGENT_TOOLS).toContain('send_message')
   })
 
   it('uses persistence existence before resume/create and never converts resume errors', async () => {
@@ -47,6 +48,26 @@ describe('production DSH host adapter', () => {
     expect(() => resolveDefaultAgentOptions({} as never)).toThrow(/default model/)
   })
 
+  it('resolves the default model separately for every future Agent instance', async () => {
+    let selection = { provider: 'deepseek-official', model: 'first-model' }
+    const seen: Array<{ provider: string; model: string }> = []
+    const registry = createDshAgentRegistry({
+      sessionPersistence: { async listSnapshots() { return [] } },
+      agentDefaultModel: { currentSelection: () => selection },
+      agents: {
+        async create(options: { agentOptions: { provider: string; model: string }; sessionId: string }) { seen.push(options.agentOptions); return { agent: { id: options.sessionId }, async dispose() {} } },
+        async resume() { throw new Error('not used') },
+      },
+    } as never)
+    await registry.create({ sessionId: 'first-session' })
+    selection = { provider: 'deepseek-official', model: 'second-model' }
+    await registry.create({ sessionId: 'second-session' })
+    expect(seen).toEqual([
+      { provider: 'deepseek-official', model: 'first-model' },
+      { provider: 'deepseek-official', model: 'second-model' },
+    ])
+  })
+
   it('disposes an agent when capabilities are unavailable after synchronous creation', async () => {
     let disposed = 0
     let assertions = 0
@@ -66,14 +87,30 @@ describe('production DSH host adapter', () => {
 
   it('restricts the hidden maintenance agent at unpublished setup time', () => {
     const calls: unknown[] = []
-    createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
-    expect(calls).toEqual([{ allow: ['skill', 'personal_skill_create', 'personal_plugin_propose', 'personal_memory_apply'] }])
+    let guard!: (execution: { name: string }) => string | undefined
+    createBackgroundAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined }, guard(value: typeof guard) { guard = value } } } as never)
+    expect(calls).toEqual([{ allow: ['skill'] }])
+    expect(guard({ name: 'skill' })).toBeUndefined()
+    for (const name of ['personal_skill_create', 'personal_memory_apply', 'send_message', 'schedule_create', 'write']) expect(guard({ name })).toBeTruthy()
   })
 
   it('restricts decision and Dream agents to read-only skill lookup', () => {
     const calls: unknown[] = []
-    createReadOnlyHiddenAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined } } } as never)
+    createReadOnlyHiddenAgentSetup()({ tools: { restrict(value: unknown) { calls.push(value); return () => undefined }, guard() {} } } as never)
     expect(calls).toEqual([{ allow: ['skill'] }])
+  })
+
+  it('clears previous reply before beginning another hidden turn', async () => {
+    const registry = createDshAgentRegistry({
+      sessionPersistence: { listSnapshots: async () => [] },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+      agents: { create: async () => ({ agent: { id: 'test', followup() {}, async whenIdle() {} }, async dispose() {} }) },
+    } as never)
+    const agent = await registry.create({ sessionId: 'test' })
+    agent.reply = '{"type":"NOOP","reason":"previous turn"}'
+    agent.followup({ text: 'next turn', source: 'heartbeat' })
+    await agent.whenIdle()
+    expect(agent.reply).toBeUndefined()
   })
 
   it('normalizes only the project workspace/runtime layout and rejects home defaults', () => {

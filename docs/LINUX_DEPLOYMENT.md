@@ -61,6 +61,24 @@ cd /opt/dshp
 PGA_REPO_ROOT=/opt/dshp corepack pnpm@11.7.0 admin:token
 ```
 
+## Model configuration
+
+The default model is stored by DSH in `/opt/dshp/runtime/dsh-home/settings.yaml`
+under the `agent-default-model` namespace. The authenticated management page writes
+this file through DSH's locked, atomic, revision-checked settings service. Do not put
+an API key in this file; `DEEPSEEK_API_KEY` remains in `/etc/dshp/dshp.env`.
+
+```yaml
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4.1-flash-expires-on-0910
+```
+
+An admin save drains the current Agents after any in-flight turn finishes. The next
+request resumes the same durable session with the new model. Valid direct file edits
+are watched by DSH, but using the management page is preferred because it also
+performs the cached-Agent handover immediately.
+
 ## Update
 
 Stop the service before changing application files so runtime state stays consistent:

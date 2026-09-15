@@ -3,6 +3,7 @@ import { MEMORY_CATEGORIES, MemoryService, ProposalSchema } from '@personal-grow
 import { AdminError, SafeAdminFiles, redactAdmin } from './files.js'
 import type { PromptStore } from './prompts.js'
 import type { HeartbeatController } from './heartbeat.js'
+import type { ModelSettingsPort } from './model-settings.js'
 
 export interface AdminRequest { method: string; path: string; query: URLSearchParams; body: unknown }
 export interface AdminSessions {
@@ -30,10 +31,12 @@ export class HostStatus {
 interface Options {
   files: SafeAdminFiles; memory: MemoryService; prompts: PromptStore; heartbeat: HeartbeatController; status: HostStatus
   sessionIds: string[]; sessions: AdminSessions; schedule: (operation: 'list' | 'create' | 'delete', args: unknown) => Promise<unknown>
-  pending: () => Promise<{ memory: number; outbound: number }>; internalPrompts?: Record<string, string>; secrets?: string[]
+  pending: () => Promise<{ memory: number; outbound: number }>; models: ModelSettingsPort; internalPrompts?: Record<string, string>; secrets?: string[]
 }
 const positiveLimit = (input: string | null, fallback: number, max: number) => z.coerce.number().int().min(1).max(max).parse(input ?? fallback)
 const createSchedule = z.object({ prompt: z.string().trim().min(1).max(8000), after_seconds: z.number().int().min(1).max(365 * 86400).optional(), every_seconds: z.number().int().min(300).max(365 * 86400).optional(), at: z.string().datetime({ offset: true }).optional() }).strict().refine(value => [value.after_seconds, value.every_seconds, value.at].filter(item => item !== undefined).length === 1)
+const modelIdentifier = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u)
+const modelSelection = z.object({ provider: modelIdentifier, model: modelIdentifier, reasoningEffort: z.string().trim().min(1).max(32).regex(/^[A-Za-z0-9_-]+$/u).optional() }).strict()
 const auditSchema = z.array(z.object({ at: z.string(), method: z.string(), path: z.string(), result: z.enum(['ok', 'error']) }).strict()).max(1000)
 export class AdminBackend {
   constructor(private options: Options) {}
@@ -58,7 +61,9 @@ export class AdminBackend {
   private async route({ method, path, query, body }: AdminRequest): Promise<unknown> {
     const { memory, files, prompts, heartbeat, sessions } = this.options
     const route = `${method} ${path}`
-    if (route === 'GET /api/status') return { ...this.options.status.snapshot(), pending: await this.options.pending(), heartbeat: heartbeat.view(), foregroundSessionId: this.options.sessionIds[0] }
+    if (route === 'GET /api/status') return { ...this.options.status.snapshot(), model: this.options.models.view().selection, pending: await this.options.pending(), heartbeat: heartbeat.view(), foregroundSessionId: this.options.sessionIds[0] }
+    if (route === 'GET /api/model') return this.options.models.view()
+    if (route === 'PUT /api/model') { const input = z.object({ selection: modelSelection, expectedRevision: z.number().int().min(0) }).strict().parse(body); return this.options.models.update(input.selection, input.expectedRevision) }
     if (route === 'GET /api/sessions') return { items: (await sessions.list()).filter(item => this.options.sessionIds.includes(item.id)).map(item => ({ ...item, hidden: item.id !== this.options.sessionIds[0] })) }
     if (route === 'GET /api/session') {
       const id = query.get('id') ?? ''; if (!this.options.sessionIds.includes(id)) throw new AdminError(404, 'session_not_found')
