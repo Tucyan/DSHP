@@ -9,8 +9,8 @@ describe('visible conversation normalization', () => {
     ])
 
     expect(messages).toEqual([
-      { id: 'session:1', role: 'user', text: 'flat', at: '2026-09-07T12:00:00.000Z' },
-      { id: 'session:2', role: 'user', text: 'nested', at: '2026-09-07T12:01:00.000Z' },
+      { id: 'session:1', role: 'user', text: 'flat', at: '2026-09-07T12:00:00.000Z', source: { kind: 'session', sessionId: 'session', seq: 1 } },
+      { id: 'session:2', role: 'user', text: 'nested', at: '2026-09-07T12:01:00.000Z', source: { kind: 'session', sessionId: 'session', seq: 2 } },
     ])
   })
 
@@ -22,7 +22,7 @@ describe('visible conversation normalization', () => {
     ])
 
     expect(messages).toEqual([
-      { id: 'sent-1', role: 'assistant', text: 'delivered', at: '2026-09-07T12:01:00.000Z' },
+      { id: 'sent-1', role: 'assistant', text: 'delivered', at: '2026-09-07T12:01:00.000Z', source: { kind: 'outbound', id: 'sent-1' } },
     ])
   })
 
