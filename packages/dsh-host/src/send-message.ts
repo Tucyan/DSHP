@@ -1,4 +1,13 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
+
+// Compatibility adapter for pinned DSH 0.1.1-rc.2: declaration merging only
+// extends TypeScript, while persistence uses this separate runtime vocabulary.
+// DSH has no downstream event registration API yet. Recognize only the event
+// owned and consumed by this Host, before any stored session is inspected.
+// Keep old logs unchanged and keep rejecting every other unknown required type.
+if (!(KNOWN_SESSION_EVENT_TYPES instanceof Set)) throw new Error('DSH session event catalog changed; review Host delivery compatibility')
+KNOWN_SESSION_EVENT_TYPES.add('personal-growth/message-sent')
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {

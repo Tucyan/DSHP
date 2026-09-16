@@ -197,3 +197,9 @@
 - Authenticated admin probe passed: lifecycle running, QQ ready, memory/outbound queues 0, prompt schema version 2 with both heartbeat prompts present; foreground unpaused and background paused state preserved.
 - Admin listener remains `127.0.0.1:3182`, environment mode `600`, Nginx MainPID `2567685` and start timestamp unchanged. Server offline smoke passed.
 - No live model requests or QQ test messages were sent in this release verification; delivery behavior is covered by deterministic tests and runtime diagnostics.
+
+## 2026-09-16 QQ recovery incident
+- Server copied-session reproduction found `SessionFormatUnsupportedError` at custom `personal-growth/message-sent` event seq 25397. The TypeScript extension had not extended DSH's runtime persistence vocabulary.
+- Added a narrow compatibility adapter for the Host-owned event with the pinned SDK; existing logs remain unchanged and unrelated unknown events still reject.
+- Same server session copy now resumes successfully without model calls or QQ sends. Added actual PersistenceCoordinator read regression coverage.
+- Root cause, compatibility limitations, reproduction and recovery procedure: `docs/plans/2026-09-16-qq-session-recovery.md`.

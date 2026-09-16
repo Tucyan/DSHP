@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import { deliverySource, registerSendMessageTool, type SendMessageInput, type SendMessageResult } from '../src/send-message.js'
 import type { DshToolRegistrar } from '../src/plugin.js'
+import { PersistenceCoordinator, SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
 
 function captureTool(send: (input: SendMessageInput) => Promise<SendMessageResult>): ToolDefinition {
   const definitions: ToolDefinition[] = []
@@ -12,6 +13,25 @@ function captureTool(send: (input: SendMessageInput) => Promise<SendMessageResul
 }
 
 describe('send_message tool', () => {
+  it('cold-loads legacy confirmed deliveries and still rejects unrelated unknown events', async () => {
+    const session = Session.create(SessionId('cold-delivery'))
+    const tool = captureTool(async () => ({ id: 'confirmed', status: 'sent' }))
+    await tool.execute({ text: 'delivered' }, { agent: { id: session.id, session }, callId: 'call' } as never)
+    const saved = { meta: session.header, events: session.events, revision: SessionPersistenceRevision('saved') }
+    const coordinator = new PersistenceCoordinator({ on() {}, effect() {}, sessions: { get() {}, list() { return [] } } } as never, {
+      name: 'test-store', async loadStored() { return structuredClone(saved) }, async readStoredRevision() { return saved.revision },
+    } as never)
+    const loaded = await coordinator.readFrom(session.id, 0)
+    expect(loaded.events).toEqual(session.events)
+    const unknown = new PersistenceCoordinator({ on() {}, effect() {}, sessions: { get() {}, list() { return [] } } } as never, {
+      name: 'test-store', async loadStored() { const data = structuredClone(saved); data.events = data.events.map(event => ({ ...event, type: 'unrecognized-plugin/event' })) as never; return data },
+    } as never)
+    await expect(unknown.readFrom(session.id, 0)).rejects.toThrow(/unknown to this harness/)
+  })
+  it('registers only the Host delivery event with the persistence vocabulary', () => {
+    expect(KNOWN_SESSION_EVENT_TYPES.has('personal-growth/message-sent')).toBe(true)
+    expect(KNOWN_SESSION_EVENT_TYPES.has('unrecognized-plugin/event')).toBe(false)
+  })
   it('classifies the current turn and never borrows an earlier user source', () => {
     const user = { type: 'user/message', data: { source: { kind: 'user' } } }
     const start = { type: 'turn/start', data: { turn: 2 } }
