@@ -11,7 +11,7 @@ KNOWN_SESSION_EVENT_TYPES.add('personal-growth/message-sent')
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
-    'personal-growth/message-sent': { id: string; callId: string; text: string; purpose?: 'progress' | 'final' }
+    'personal-growth/message-sent': { id: string; callId: string; text: string; purpose?: 'progress' | 'final'; origin?: 'user_reply' | 'heartbeat' | 'schedule' | 'fallback' | 'legacy_unknown'; inboundId?: string; sessionId?: string; firstAttemptAt?: string; confirmedAt?: string; confirmationSource?: 'transport' | 'operator' }
   }
 }
 

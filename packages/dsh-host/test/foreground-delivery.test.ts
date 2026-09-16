@@ -26,6 +26,22 @@ describe('foreground delivery guarantees', () => {
     expect(f.sent).toEqual(['visible reply'])
     await f.bridge.stop()
   })
+
+  it('passes explicit delivery origin metadata to the outbound claim', async () => {
+    const claims: unknown[] = []
+    const f = await fixture(async bridge => { await bridge.sendActiveMessage(input) }, {
+      state: {
+        async acceptInbound() { return true },
+        async claimOutbound(key, envelope) { claims.push({ key, envelope }); return 'claimed' },
+        async completeOutbound() {},
+        async nextSequence() { return 1 },
+      },
+    })
+    await f.receive()
+    const envelope = (claims[0] as { envelope: { metadata: Record<string, unknown> } }).envelope
+    expect(envelope.metadata).toMatchObject({ origin: 'user_reply', purpose: 'final', inboundId: 'in-1', sessionId: sessionIdForPeer('peer') })
+    await f.bridge.stop()
+  })
   it('uses fixed public fallback after exactly one failed correction', async () => {
     const f = await fixture(async () => {})
     await f.receive()

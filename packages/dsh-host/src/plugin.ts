@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type ConversationEvent, type MemoryTurnInput } from './bridge.js'
+import { PersonalGrowthBridge, sessionIdForPeer, type BridgeAgent, type BridgeAgentRegistry, type BridgeInbound, type BridgeMemory, type BridgeBot, type BridgeDream, type BridgeHeartbeat, type ConversationEvent, type MemoryTurnInput, type DeliveryMetadata } from './bridge.js'
 import { MemoryService } from '@personal-growth/personal-memory'
 import { FileBridgeState } from './state.js'
 import { dirname, resolve, sep } from 'node:path'
@@ -371,8 +371,8 @@ function wrapAgent(handle: AgentHandle, tracker?: CompletionTracker): BridgeAgen
       wrapped.reply = undefined
       agent.followup(createUserMessage({ content: [{ type: 'text', text: message.text }], source: !message.source || message.source === 'user' ? { kind: 'user' } : { kind: 'plugin', plugin: 'personal-growth-dsh-host', form: 'snapshot', sections: [{ name: message.source, text: message.text }] } }))
     },
-    recordSent: async (id, text) => {
-      if (!agent.session.events.some(event => event.type === 'personal-growth/message-sent' && event.data.id === id)) agent.session.append('personal-growth/message-sent', { id, callId: 'host-fallback', text })
+    recordSent: async (id, text, metadata) => {
+      if (!agent.session.events.some(event => event.type === 'personal-growth/message-sent' && event.data.id === id)) agent.session.append('personal-growth/message-sent', { id, callId: 'host-fallback', text, ...(metadata ?? {}) })
     },
     whenIdle: async () => {
       if (tracker) {
@@ -830,10 +830,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       await pathValidation
       if (disposed) return
       if (adminEnabled) { await prompts.initialize(); await control.initialize(); if (disposed) return }
-      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }, status), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, recordFallback: async (key, text) => {
-        const sessionId = sessionIdForPeer(allowedPeerId)
-        const batch = await bridgeState.claimMemoryTurnBatch!(key, sessionId, [{ sessionId, role: 'assistant', content: text, at: new Date().toISOString() }])
-        if (batch.status === 'claimed') await consumeDurableMemoryTurn(key, sessionId, batch.events)
+      bridge = new PersonalGrowthBridge({ bot: config.bot ?? createBot({ ...config, appId, appSecret, onInboundError: error => Promise.resolve().then(() => config.onInboundError?.(error)).catch(() => appendTrace({ type: 'inbound', at: new Date().toISOString(), status: 'failure', reason: 'handler_failure' })) }, status), registry: bridgeRegistry, memory, state: bridgeState, processMemory: false, recordDelivery: async (key, text, metadata: DeliveryMetadata) => {
+        const owner = await bridgeRegistry.resume({ sessionId: sessionIdForPeer(allowedPeerId) })
+        await owner.recordSent?.(key, text, metadata)
       }, dream: dreamAdapter, heartbeat, foregroundWake: config.heartbeat ? undefined : { prompt: foregroundPrompt, run: (input, execute) => foregroundRunner.run(input, execute), deliver: (key, send) => foregroundRunner.deliver(key, send) }, allowedPeerId, cadence: adminEnabled ? {} : config.cadence ?? { foregroundMs: 60 * 60 * 1000, backgroundMs: 30 * 60 * 1000 }, trace: appendTrace, onStartError: error => { status.lifecycle = 'error'; process.nextTick(() => { throw error }) } })
       await bridge.start()
       if (disposed) { await bridge.stop(); return }

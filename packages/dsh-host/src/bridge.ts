@@ -11,7 +11,17 @@ export interface BridgeInbound {
 }
 
 export interface BridgeTarget { peerId: string; messageId?: string }
-export interface OutboundEnvelope { target: BridgeTarget; text: string }
+export type ActivityOrigin = 'user_reply' | 'heartbeat' | 'schedule' | 'fallback' | 'legacy_unknown'
+export interface DeliveryMetadata {
+  origin: ActivityOrigin
+  purpose: 'progress' | 'final'
+  inboundId?: string
+  sessionId: string
+  firstAttemptAt: string
+  confirmedAt?: string
+  confirmationSource?: 'transport' | 'operator'
+}
+export interface OutboundEnvelope { target: BridgeTarget; text: string; metadata?: DeliveryMetadata }
 
 export interface BridgeBot {
   onMessage(handler: (message: BridgeInbound) => Promise<void>): void
@@ -32,7 +42,7 @@ export interface BridgeAgent {
   /** Test-only fallback. Production turn completion is tracked by the host plugin. */
   reply?: string
   dispose?: () => Promise<void>
-  recordSent?: (id: string, text: string) => Promise<void>
+  recordSent?: (id: string, text: string, metadata?: DeliveryMetadata) => Promise<void>
 }
 
 export interface BridgeAgentRegistry {
@@ -138,7 +148,8 @@ export interface PersonalGrowthBridgeOptions {
   onStartError?: (error: unknown) => void
   /** Production DSH session observers own the single consume/Dream pipeline. */
   processMemory?: boolean
-  recordFallback?: (id: string, text: string) => Promise<void>
+  recordDelivery?: (id: string, text: string, metadata: DeliveryMetadata) => Promise<void>
+  recordFallback?: (id: string, text: string, metadata?: DeliveryMetadata) => Promise<void>
   trace?: (record: { type: string; at: string; key?: string; status?: string; reason?: string }) => void | Promise<void>
 }
 
@@ -252,7 +263,7 @@ export class PersonalGrowthBridge {
     if (!this.started || !this.options.heartbeat) return
     const result = await this.options.heartbeat.wakeForeground(input) as { action?: { type?: string; text?: string } } | undefined
     if (result?.action?.type === 'MESSAGE_USER' && result.action.text?.trim()) {
-      await this.sendOutbound(`${sessionIdForPeer(this.options.allowedPeerId)}:heartbeat:${input.occurrenceId}`, { peerId: this.options.allowedPeerId }, result.action.text)
+      await this.sendOutbound(`${sessionIdForPeer(this.options.allowedPeerId)}:heartbeat:${input.occurrenceId}`, { peerId: this.options.allowedPeerId }, result.action.text, { origin: 'schedule', purpose: 'final', sessionId: sessionIdForPeer(this.options.allowedPeerId) })
     }
     return result
   }
@@ -295,7 +306,7 @@ export class PersonalGrowthBridge {
     if (delivery?.uncertain) return { id, status: 'unknown' }
     let status: SendMessageStatus
     try {
-      const send = () => this.sendOutbound(id, { peerId: this.options.allowedPeerId, ...(delivery?.kind === 'heartbeat' ? {} : { messageId: inboundId }) }, input.text)
+      const send = () => this.sendOutbound(id, { peerId: this.options.allowedPeerId, ...(delivery?.kind === 'heartbeat' ? {} : { messageId: inboundId }) }, input.text, { origin: delivery?.kind === 'heartbeat' ? 'heartbeat' : 'user_reply', purpose: input.purpose ?? 'final', ...(delivery?.kind === 'heartbeat' ? {} : { inboundId }), sessionId })
       status = delivery?.kind === 'heartbeat' ? await this.options.foregroundWake!.deliver(id, send) : await send()
     } catch (error) { if (delivery) delivery.uncertain = true; throw error }
     if (delivery) {
@@ -382,11 +393,11 @@ export class PersonalGrowthBridge {
         await ensureLease()
         if (!this.activeDelivery.finalSent && !this.activeDelivery.uncertain) {
           const id = `${sessionId}:turn:${message.messageId}:fallback`
-          const delivery = await this.sendOutbound(id, { peerId: this.options.allowedPeerId, messageId: message.messageId }, DELIVERY_FALLBACK)
+          const delivery = await this.sendOutbound(id, { peerId: this.options.allowedPeerId, messageId: message.messageId }, DELIVERY_FALLBACK, { origin: 'fallback', purpose: 'final', inboundId: message.messageId, sessionId })
           if (delivery === 'sent' || delivery === 'already_sent') {
-            await agent.recordSent?.(id, DELIVERY_FALLBACK)
-            if (this.options.recordFallback) await this.options.recordFallback(id, DELIVERY_FALLBACK)
-            else await this.options.memory.consume([{ sessionId, seq: await this.nextSequence(sessionId), role: 'assistant', content: DELIVERY_FALLBACK, at: new Date().toISOString() }])
+            const metadata = { origin: 'fallback' as const, purpose: 'final' as const, inboundId: message.messageId, sessionId, firstAttemptAt: this.options.now?.() ?? new Date().toISOString(), confirmedAt: this.options.now?.() ?? new Date().toISOString(), confirmationSource: 'transport' as const }
+            if (this.options.recordFallback) await this.options.recordFallback(id, DELIVERY_FALLBACK, metadata)
+            else if (!this.options.recordDelivery) await this.options.memory.consume([{ sessionId, seq: await this.nextSequence(sessionId), role: 'assistant', content: DELIVERY_FALLBACK, at: this.options.now?.() ?? new Date().toISOString(), source: { kind: 'outbound', id } }])
           }
           await this.emitTrace({ type: 'inbound', at: new Date().toISOString(), key: message.messageId, status: 'delivery_fallback', reason: delivery })
         }
@@ -448,9 +459,9 @@ export class PersonalGrowthBridge {
     void task.finally(() => this.workerTasks.delete(task)).catch(() => undefined)
   }
 
-  private async sendOutbound(key: string, target: BridgeTarget, text: string): Promise<SendMessageStatus> {
+  private async sendOutbound(key: string, target: BridgeTarget, text: string, metadata?: Partial<DeliveryMetadata> & Pick<DeliveryMetadata, 'origin' | 'purpose' | 'sessionId'>): Promise<SendMessageStatus> {
     const state = this.options.state
-    const envelope = { target, text }
+    const envelope = { target, text, metadata: { origin: metadata?.origin ?? 'legacy_unknown', purpose: metadata?.purpose ?? 'final', ...(metadata?.inboundId ? { inboundId: metadata.inboundId } : {}), sessionId: metadata?.sessionId ?? sessionIdForPeer(this.options.allowedPeerId), firstAttemptAt: metadata?.firstAttemptAt ?? this.options.now?.() ?? new Date().toISOString(), ...(metadata?.confirmedAt ? { confirmedAt: metadata.confirmedAt } : {}), ...(metadata?.confirmationSource ? { confirmationSource: metadata.confirmationSource } : {}) } }
     if (target.peerId !== this.options.allowedPeerId) {
       const status = state?.claimOutbound ? await state.claimOutbound(key, envelope) : 'unknown'
       if (status === 'claimed') await state?.markOutboundUnknown?.(key)
@@ -467,6 +478,7 @@ export class PersonalGrowthBridge {
       if (state?.markOutboundDispatched) await state.markOutboundDispatched(key)
       await this.options.bot.sendText(target, text)
       if (state?.completeOutbound) await state.completeOutbound(key)
+      try { await this.options.recordDelivery?.(key, text, { ...envelope.metadata, confirmedAt: this.options.now?.() ?? new Date().toISOString(), confirmationSource: 'transport' }) } catch { /* the outbound ledger remains authoritative when session recording fails */ }
       await this.emitTrace({ type: 'outbound', at: new Date().toISOString(), key, status: 'sent' })
       return 'sent'
     } catch (error) {
@@ -480,7 +492,7 @@ export class PersonalGrowthBridge {
   private async recoverPendingOutbound(): Promise<void> {
     const pending = await this.options.state?.listPendingOutbound?.() ?? []
     for (const item of pending) {
-      try { await this.sendOutbound(item.key, item.target, item.text) }
+      try { await this.sendOutbound(item.key, item.target, item.text, item.metadata) }
       catch { /* unknown is durably retained; startup must not retry it blindly */ }
     }
   }

@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, parse } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
-import type { BridgeState, ConversationEvent, MemoryTurnInput, SourceRef } from './bridge.js'
+import type { BridgeState, ConversationEvent, MemoryTurnInput, SourceRef, DeliveryMetadata } from './bridge.js'
 import type { OutboundEnvelope } from './bridge.js'
 
 const MAX_ENTRIES = 10_000
@@ -12,7 +12,7 @@ interface TraceRecord { type: string; at: string; key?: string; status?: string;
 type InboundRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string }
 type HistoryRecordState = InboundRecord
 type MemoryTurnRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string; events: ConversationEvent[] }
-type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string; target?: { peerId: string; messageId?: string }; text?: string }
+type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string; target?: { peerId: string; messageId?: string }; text?: string; metadata?: DeliveryMetadata }
 interface StateFile { inbound: Record<string, InboundRecord>; outbound: Record<string, OutboundRecord>; sequences: Record<string, number>; histories: Record<string, HistoryRecordState>; memoryTurns: Record<string, MemoryTurnRecord>; traces: TraceRecord[] }
 export type OutboundClaim = 'claimed' | 'sent' | 'pending' | 'unknown'
 interface LockOwner { token: string; pid: number; leaseUntil: string }
@@ -23,7 +23,7 @@ function strictObject(value: unknown, allowed: readonly string[]): Record<string
   return result
 }
 function parseLease(value: unknown): OutboundRecord {
-  const object = strictObject(value, ['status', 'owner', 'leaseUntil', 'target', 'text'])
+  const object = strictObject(value, ['status', 'owner', 'leaseUntil', 'target', 'text', 'metadata'])
   if (!['pending', 'sent', 'unknown'].includes(String(object.status))) throw new Error('Malformed outbound state')
   validateLeaseFields(object)
   if ((object.status === 'pending' || object.status === 'unknown') && (typeof object.owner !== 'string' || typeof object.leaseUntil !== 'string')) throw new Error('Outbound lease metadata is required')
@@ -33,8 +33,14 @@ function parseLease(value: unknown): OutboundRecord {
     if (typeof target.peerId !== 'string' || target.peerId.length < 1 || target.peerId.length > MAX_ID || (target.messageId !== undefined && (typeof target.messageId !== 'string' || target.messageId.length > MAX_ID))) throw new Error('Malformed outbound target')
   }
   if ((object.status === 'pending' || object.status === 'unknown') && (!object.target || typeof object.text !== 'string' || !object.text)) throw new Error('Outbound payload is required for pending/unknown state')
+  if (object.metadata !== undefined) parseDeliveryMetadata(object.metadata)
   if (object.status === 'sent' && (object.owner !== undefined || object.leaseUntil !== undefined || object.target !== undefined || object.text !== undefined)) throw new Error('Sent outbound state may not carry lease or payload metadata')
   return object as unknown as OutboundRecord
+}
+function parseDeliveryMetadata(value: unknown): DeliveryMetadata {
+  const object = strictObject(value, ['origin', 'purpose', 'inboundId', 'sessionId', 'firstAttemptAt', 'confirmedAt', 'confirmationSource'])
+  if (!['user_reply', 'heartbeat', 'schedule', 'fallback', 'legacy_unknown'].includes(String(object.origin)) || !['progress', 'final'].includes(String(object.purpose)) || typeof object.sessionId !== 'string' || !object.sessionId || typeof object.firstAttemptAt !== 'string' || !Number.isFinite(Date.parse(object.firstAttemptAt)) || (object.inboundId !== undefined && typeof object.inboundId !== 'string') || (object.confirmedAt !== undefined && (typeof object.confirmedAt !== 'string' || !Number.isFinite(Date.parse(object.confirmedAt)))) || (object.confirmationSource !== undefined && object.confirmationSource !== 'transport' && object.confirmationSource !== 'operator')) throw new Error('Malformed delivery metadata')
+  return object as unknown as DeliveryMetadata
 }
 function parseInbound(value: unknown): InboundRecord {
   const object = strictObject(value, ['status', 'owner', 'leaseUntil'])
@@ -278,13 +284,16 @@ export class FileBridgeState implements BridgeState {
       const now = Date.now()
       if (current?.status === 'pending' && current.owner !== this.owner && current.leaseUntil && Date.parse(current.leaseUntil) > now) return 'pending'
       if (!envelope && !current?.target) throw new Error('Outbound payload is required')
-      state.outbound[key] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString(), target: envelope?.target ?? current?.target, text: envelope?.text ?? current?.text }
+      if (current && envelope && ((current.text !== undefined && current.text !== envelope.text) || (current.target && JSON.stringify(current.target) !== JSON.stringify(envelope.target)))) throw new Error('Outbound identity conflict')
+      const metadata = envelope?.metadata ?? current?.metadata
+      if (current?.metadata && envelope?.metadata && JSON.stringify(current.metadata) !== JSON.stringify(envelope.metadata)) throw new Error('Outbound identity conflict')
+      state.outbound[key] = { status: 'pending', owner: this.owner, leaseUntil: new Date(now + this.lockTimeoutMs).toISOString(), target: envelope?.target ?? current?.target, text: envelope?.text ?? current?.text, metadata }
       return 'claimed'
     })
   }
 
   listPendingOutbound(): Promise<Array<{ key: string } & OutboundEnvelope>> {
-    return this.update(state => Object.entries(state.outbound).filter(([, value]) => value.status === 'pending' && value.target && value.text).map(([key, value]) => ({ key, target: value.target!, text: value.text! })))
+    return this.update(state => Object.entries(state.outbound).filter(([, value]) => value.status === 'pending' && value.target && value.text).map(([key, value]) => ({ key, target: value.target!, text: value.text!, ...(value.metadata ? { metadata: value.metadata } : {}) })))
   }
 
   markOutboundDispatched(key: string): Promise<void> {
@@ -302,7 +311,7 @@ export class FileBridgeState implements BridgeState {
       const current = state.outbound[key]
       if (!current) throw new Error('bridge outbound claim is missing')
       if ((current?.status === 'pending' || current?.status === 'unknown') && current.owner !== this.owner) throw new Error('bridge outbound ownership lost')
-      state.outbound[key] = { status: 'sent' }
+      state.outbound[key] = { status: 'sent', ...(current.metadata ? { metadata: { ...current.metadata, confirmedAt: current.metadata.confirmedAt ?? new Date().toISOString(), confirmationSource: current.metadata.confirmationSource ?? 'transport' } } : {}) }
     })
   }
 
@@ -322,7 +331,7 @@ export class FileBridgeState implements BridgeState {
       const current = state.outbound[key]
       if (current?.status !== 'unknown') throw new Error('outbound reconciliation requires unknown outcome')
       if (decision === 'retry') state.outbound[key] = { ...current, status: 'pending', owner: this.owner, leaseUntil: new Date(Date.now() + this.lockTimeoutMs).toISOString() }
-      else state.outbound[key] = { status: 'sent' }
+      else state.outbound[key] = { status: 'sent', ...(current.metadata ? { metadata: { ...current.metadata, confirmedAt: current.metadata.confirmedAt ?? new Date().toISOString(), confirmationSource: 'operator' } } : {}) }
     })
   }
 
@@ -404,6 +413,7 @@ export class FileBridgeState implements BridgeState {
     if (!envelope || typeof envelope.text !== 'string' || envelope.text.length < 1 || envelope.text.length > 20_000) throw new Error('Outbound payload exceeds bounds')
     this.assertId(envelope.target.peerId)
     if (envelope.target.messageId !== undefined) this.assertId(envelope.target.messageId)
+    if (envelope.metadata) parseDeliveryMetadata(envelope.metadata)
   }
 
   private async assertSafePath(): Promise<void> {

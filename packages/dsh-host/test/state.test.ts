@@ -217,6 +217,31 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('retains delivery metadata when a pending outbound is confirmed and after restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-metadata-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const first = new FileBridgeState(file)
+      const metadata = { origin: 'user_reply' as const, purpose: 'final' as const, inboundId: 'in-1', sessionId: 'session-1', firstAttemptAt: '2026-09-16T10:00:00.000Z' }
+      await expect(first.claimOutbound('meta', { target: { peerId: 'p' }, text: 'hello', metadata })).resolves.toBe('claimed')
+      await first.completeOutbound('meta')
+      const restarted = new FileBridgeState(file)
+      expect(await restarted.claimOutbound('meta')).toBe('sent')
+      const raw = JSON.parse(await readFile(file, 'utf8')) as { outbound: Record<string, { metadata?: Record<string, unknown> }> }
+      expect(raw.outbound.meta.metadata).toMatchObject({ ...metadata, confirmationSource: 'transport' })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('rejects changing outbound payload identity while a claim is retained', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-identity-'))
+    try {
+      const state = new FileBridgeState(join(root, 'bridge.json'))
+      const metadata = { origin: 'schedule' as const, purpose: 'final' as const, sessionId: 'session-1', firstAttemptAt: '2026-09-16T10:00:00.000Z' }
+      await state.claimOutbound('same', { target: { peerId: 'p' }, text: 'first', metadata })
+      await expect(state.claimOutbound('same', { target: { peerId: 'p' }, text: 'changed', metadata })).rejects.toThrow(/identity conflict/)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('reclaims only a proven expired lock owner before operating', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-lock-'))
     try {
