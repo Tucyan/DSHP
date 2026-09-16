@@ -27,6 +27,8 @@ import { startAdminServer } from './admin/server.js'
 import { requestHiddenAction } from './hidden-action.js'
 import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
 import { normalizeVisibleMessages } from './activity.js'
+import { ActivityReader } from './activity-reader.js'
+import { registerActivityTool, type ActivityToolRegistrar } from './activity-tool.js'
 import { executeSkillAction } from './skill-action.js'
 import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
 import { registerSendMessageTool, type SendMessage, type SendMessageToolRegistrar } from './send-message.js'
@@ -490,6 +492,8 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   if (!toolRuntime) throw new Error('personal-growth-dsh-host requires public DSH tool runtime')
   const tracker = completionTracker()
   const bridgeState = new FileBridgeState(resolve(workspaceRoot, '.personal-growth', 'bridge-state.json'))
+  const activityTimeZone = () => (config.heartbeatConfig ?? buildHeartbeatConfig()).timeZone ?? 'Asia/Singapore'
+  const activityReader = new ActivityReader({ sessionPersistence: ctx.sessionPersistence as never, bridgeState, memory: service })
   const tracePath = resolve(workspaceRoot, '.personal-growth', 'trace.jsonl')
   const traceTypes = new Set(['inbound', 'outbound', 'history', 'dream_proposal', 'memory_apply', 'memory_consume', 'memory_recovery', 'heartbeat', 'heartbeat_decision', 'model'])
   const appendTrace = async (record: Record<string, unknown>): Promise<void> => {
@@ -725,6 +729,11 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       return bridge.sendActiveMessage(input)
     })
     installMessageDeliveryPrompt(agentCtx)
+    registerActivityTool((agentCtx as unknown as { tools: ActivityToolRegistrar }).tools, query => activityReader.read(query), {
+      timeZone: activityTimeZone,
+      date: () => new Intl.DateTimeFormat('en-CA', { timeZone: activityTimeZone() }).format(new Date()),
+      asOf: () => new Date().toISOString(),
+    })
     const tools = (agentCtx as unknown as { tools: { guard(check: (execution: { name: string }) => string | undefined): unknown } }).tools
     tools.guard(execution => bridge?.isRepairingDelivery() && execution.name !== 'send_message' ? 'delivery_repair_only_send_message' : undefined)
     if (adminEnabled) installManagedPrompt(agentCtx, id, prompts)
