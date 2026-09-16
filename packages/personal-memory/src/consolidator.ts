@@ -7,14 +7,20 @@ import { withWorkspaceLock } from './lock.js';
 /** Hard upper bounds keep persisted sequence arithmetic and history ranges resource-safe. */
 export const MAX_CONVERSATION_SEQ = 1_000_000;
 export const MAX_HISTORY_RANGE = 100_000;
-export const ConversationEventSchema = z.object({ sessionId: z.string().min(1), seq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), role: z.enum(['user', 'assistant']), content: z.string().min(1), at: z.string().datetime({ offset: true }) }).strict();
+export const SourceRefSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('session'), sessionId: z.string().min(1).max(512), seq: z.number().int().positive().max(MAX_CONVERSATION_SEQ) }).strict(),
+  z.object({ kind: z.literal('outbound'), id: z.string().min(1).max(512) }).strict(),
+]);
+export type SourceRef = z.infer<typeof SourceRefSchema>;
+export const ConversationEventSchema = z.object({ sessionId: z.string().min(1), seq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), role: z.enum(['user', 'assistant']), content: z.string().min(1), at: z.string().datetime({ offset: true }), source: SourceRefSchema.optional() }).strict();
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
-export const HistoryRecordSchema = z.object({ id: z.string().min(1), sessionId: z.string().min(1), fromSeq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), toSeq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), sourceRefs: z.array(z.string().min(1)).min(1).max(MAX_HISTORY_RANGE), summary: z.string().min(1), at: z.string().datetime({ offset: true }) }).strict().superRefine((record, ctx) => {
+export const HistoryRecordSchema = z.object({ id: z.string().min(1), sessionId: z.string().min(1), fromSeq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), toSeq: z.number().int().positive().max(MAX_CONVERSATION_SEQ), sourceRefs: z.array(z.string().min(1)).min(1).max(MAX_HISTORY_RANGE), activitySources: z.array(SourceRefSchema).max(MAX_HISTORY_RANGE).optional(), occurredFrom: z.string().datetime({ offset: true }).optional(), occurredTo: z.string().datetime({ offset: true }).optional(), summary: z.string().min(1), at: z.string().datetime({ offset: true }) }).strict().superRefine((record, ctx) => {
   if (record.fromSeq > record.toSeq) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'History range is reversed' });
   if (record.toSeq - record.fromSeq + 1 > MAX_HISTORY_RANGE) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'History range exceeds maximum' });
   const references = record.sourceRefs.map((ref) => { const match = ref.match(/^(.+):(\d+)$/); return match ? { sessionId: match[1], seq: Number(match[2]) } : undefined; });
   const seqs = references.filter((ref): ref is { sessionId: string; seq: number } => Boolean(ref)).map((ref) => ref.seq).sort((a, b) => a - b);
   if (new Set(record.sourceRefs).size !== record.sourceRefs.length || references.some((ref) => !ref || ref.sessionId !== record.sessionId || ref.seq < record.fromSeq || ref.seq > record.toSeq) || seqs.length !== record.toSeq - record.fromSeq + 1 || seqs.some((seq, index) => seq !== record.fromSeq + index) || references.some((ref, index) => !ref || ref.seq !== record.fromSeq + index)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'History sourceRefs do not match session range' });
+  if ((record.occurredFrom && !record.occurredTo) || (!record.occurredFrom && record.occurredTo) || (record.occurredFrom && record.occurredTo && Date.parse(record.occurredFrom) > Date.parse(record.occurredTo))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'History occurred bounds are invalid' });
 });
 export type HistoryRecord = z.infer<typeof HistoryRecordSchema>;
 const StateSchema = z.object({ memoryCursor: z.record(z.string(), z.number().int().nonnegative().max(MAX_CONVERSATION_SEQ)).default({}), pendingMutation: z.unknown().optional() }).strict();
@@ -52,7 +58,12 @@ export class CursorConsolidator {
       const compressed = await this.compressor.compress(plan.events);
       const summary = typeof compressed === 'string' ? compressed : (compressed as unknown as { summary?: string })?.summary;
       if (!summary?.trim()) throw new Error('Compressor returned an empty summary');
-      records.push(HistoryRecordSchema.parse({ id: plan.id, sessionId: plan.sessionId, fromSeq: plan.fromSeq, toSeq: plan.toSeq, sourceRefs: plan.events.map((event) => `${event.sessionId}:${event.seq}`), summary: summary.trim(), at: this.clock() }));
+      // Preserve an exact one-to-one mapping only when every compressed event has
+      // a stable source. Partial mappings would falsely imply that the omitted
+      // events participated in the activity view.
+      const activitySources = plan.events.every((event) => event.source) ? plan.events.map((event) => event.source!) : undefined;
+      const occurrenceTimes = plan.events.map((event) => Date.parse(event.at));
+      records.push(HistoryRecordSchema.parse({ id: plan.id, sessionId: plan.sessionId, fromSeq: plan.fromSeq, toSeq: plan.toSeq, sourceRefs: plan.events.map((event) => `${event.sessionId}:${event.seq}`), ...(activitySources ? { activitySources } : {}), ...(occurrenceTimes.length ? { occurredFrom: new Date(Math.min(...occurrenceTimes)).toISOString(), occurredTo: new Date(Math.max(...occurrenceTimes)).toISOString() } : {}), summary: summary.trim(), at: this.clock() }));
     }
     const committed = await this.withLock(() => this.commit(prepared, records));
     if (committed.retry) {

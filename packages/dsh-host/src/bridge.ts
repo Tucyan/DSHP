@@ -55,6 +55,12 @@ export interface BridgeDream {
 export type MemoryTurnClaim = 'claimed' | 'completed' | 'pending'
 export type MemoryTurnInput = Omit<ConversationEvent, 'seq'>
 
+/** Stable provenance for a visible activity event. Session seq is the DSH event sequence,
+ * while ConversationEvent.seq is independently allocated by the memory ledger. */
+export type SourceRef =
+  | { kind: 'session'; sessionId: string; seq: number }
+  | { kind: 'outbound'; id: string }
+
 /** Durable state is supplied by the production host; this prevents restart races. */
 export interface BridgeState {
   acceptInbound(messageId: string): Promise<boolean>
@@ -110,6 +116,7 @@ export interface ConversationEvent {
   role: 'user' | 'assistant'
   content: string
   at: string
+  source?: SourceRef
 }
 
 export interface PersonalGrowthBridgeOptions {

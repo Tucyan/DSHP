@@ -152,6 +152,52 @@ describe('FileBridgeState', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('keeps DSH provenance separate from allocated memory sequence across retry and restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-memory-provenance-'))
+    try {
+      const file = join(root, 'bridge.json')
+      const first = new FileBridgeState(file)
+      const initial = [{
+        sessionId: 's',
+        role: 'user' as const,
+        content: 'before midnight',
+        at: '2026-09-15T23:59:59.000Z',
+        source: { kind: 'session' as const, sessionId: 'dsh-session', seq: 25_397 },
+      }]
+      const claimed = await first.claimMemoryTurnBatch('s:turn:provenance', 's', initial)
+      expect(claimed.events).toEqual([{ ...initial[0], seq: 1 }])
+
+      await first.failMemoryTurn('s:turn:provenance')
+      const reopened = new FileBridgeState(file)
+      const changedRetry = [{
+        ...initial[0],
+        at: '2026-09-16T00:00:05.000Z',
+        source: { kind: 'session' as const, sessionId: 'dsh-session', seq: 25_398 },
+      }]
+      const retried = await reopened.claimMemoryTurnBatch('s:turn:provenance', 's', changedRetry)
+      expect(retried.status).toBe('claimed')
+      expect(retried.events).toEqual(claimed.events)
+      expect(await reopened.nextSequence('s')).toBe(2)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('strictly rejects malformed persisted memory provenance', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pga-host-memory-provenance-schema-'))
+    try {
+      const file = join(root, 'bridge.json')
+      await writeFile(file, JSON.stringify({
+        inbound: {}, outbound: {}, sequences: { s: 1 }, histories: {}, traces: [],
+        memoryTurns: {
+          bad: {
+            status: 'completed',
+            events: [{ sessionId: 's', seq: 1, role: 'user', content: 'x', at: '2026-09-15T23:59:59.000Z', source: { kind: 'session', sessionId: 'dsh-session', seq: 0 } }],
+          },
+        },
+      }))
+      await expect(new FileBridgeState(file).nextSequence('s')).rejects.toThrow(/source|provenance|memory turn|malformed/i)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('uses durable outbound pending and sent states with explicit reconcile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pga-host-outbound-'))
     try {

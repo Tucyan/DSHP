@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile, rm, lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, parse } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
-import type { BridgeState, ConversationEvent, MemoryTurnInput } from './bridge.js'
+import type { BridgeState, ConversationEvent, MemoryTurnInput, SourceRef } from './bridge.js'
 import type { OutboundEnvelope } from './bridge.js'
 
 const MAX_ENTRIES = 10_000
@@ -61,12 +61,25 @@ function parseMemoryTurn(value: unknown): MemoryTurnRecord {
   if (object.status === 'completed' && (object.owner !== undefined || object.leaseUntil !== undefined)) throw new Error('Completed memory turn may not carry lease metadata')
   if (!Array.isArray(object.events) || object.events.length < 1 || object.events.length > 100) throw new Error('Malformed memory turn events')
   const events = object.events.map(event => {
-    const item = strictObject(event, ['sessionId', 'seq', 'role', 'content', 'at'])
+    const item = strictObject(event, ['sessionId', 'seq', 'role', 'content', 'at', 'source'])
     const eventTime = typeof item.at === 'string' ? Date.parse(item.at) : Number.NaN
     if (typeof item.sessionId !== 'string' || item.sessionId.length < 1 || item.sessionId.length > MAX_ID || !Number.isInteger(item.seq) || Number(item.seq) < 1 || Number(item.seq) > MAX_SEQ || (item.role !== 'user' && item.role !== 'assistant') || typeof item.content !== 'string' || item.content.length < 1 || item.content.length > 20_000 || typeof item.at !== 'string' || !/T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(item.at) || !Number.isFinite(eventTime) || eventTime < Date.UTC(2000, 0, 1) || eventTime > Date.UTC(2100, 0, 1)) throw new Error('Malformed memory turn event')
+    if (item.source !== undefined) parseSource(item.source)
     return item as unknown as ConversationEvent
   })
   return { ...object, events } as unknown as MemoryTurnRecord
+}
+function parseSource(value: unknown): SourceRef {
+  const object = strictObject(value, ['kind', 'sessionId', 'seq', 'id'])
+  if (object.kind === 'session') {
+    if (typeof object.sessionId !== 'string' || object.sessionId.length < 1 || object.sessionId.length > MAX_ID || !Number.isInteger(object.seq) || Number(object.seq) < 1 || Number(object.seq) > MAX_SEQ || object.id !== undefined) throw new Error('Malformed memory turn source')
+    return { kind: 'session', sessionId: object.sessionId, seq: Number(object.seq) }
+  }
+  if (object.kind === 'outbound') {
+    if (typeof object.id !== 'string' || object.id.length < 1 || object.id.length > MAX_ID || object.sessionId !== undefined || object.seq !== undefined) throw new Error('Malformed memory turn source')
+    return { kind: 'outbound', id: object.id }
+  }
+  throw new Error('Malformed memory turn source')
 }
 function parseLockOwner(value: unknown): LockOwner {
   const object = strictObject(value, ['token', 'pid', 'leaseUntil'])

@@ -578,7 +578,7 @@ export function apply(ctx: Context, config: DshHostConfig): void {
         await appendTrace({ type: 'memory_consume', at: new Date().toISOString(), key: sessionId, status: 'retry', reason: attempt < 2 ? 'consumer_failure' : 'retry_exhausted' })
         if (attempt >= 2) throw error
         await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)))
-        const retryInputs: MemoryTurnInput[] = events.map(event => ({ sessionId: event.sessionId, role: event.role, content: event.content, at: event.at }))
+        const retryInputs: MemoryTurnInput[] = events.map(event => ({ sessionId: event.sessionId, role: event.role, content: event.content, at: event.at, ...(event.source ? { source: event.source } : {}) }))
         const retry = await bridgeState.claimMemoryTurnBatch?.(key, sessionId, retryInputs)
         if (!retry || retry.status === 'pending') throw error
         if (retry.status === 'completed') return
@@ -743,9 +743,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const activeTurns = new Map<string, number>()
   const maintenanceTasks = new Set<Promise<unknown>>()
   const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; time?: number; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
-    const messages = normalizeVisibleMessages(events, { sessionId, includePluginUsers: true })
+    const messages = normalizeVisibleMessages(events, { sessionId, includePluginUsers: false })
     if (!messages.length) return
-    const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, role: message.role, content: message.text, at: message.at }))
+    const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, role: message.role, content: message.text, at: message.at, ...(message.source ? { source: message.source } : {}) }))
     if (!bridgeState.claimMemoryTurnBatch) throw new Error('personal-growth-dsh-host requires atomic memory-turn claims')
     const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, inputs)
     if (batch.status === 'completed' || batch.status === 'pending') return

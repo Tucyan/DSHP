@@ -17,6 +17,7 @@ export type {
   BridgeHeartbeat,
   BridgeSessionEvent,
   ConversationEvent,
+  SourceRef,
   PersonalGrowthBridgeOptions,
 } from './bridge.js'
 export * from './composition.js'
