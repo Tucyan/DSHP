@@ -13,6 +13,7 @@ type InboundRecord = { status: 'pending' | 'completed'; owner?: string; leaseUnt
 type HistoryRecordState = InboundRecord
 type MemoryTurnRecord = { status: 'pending' | 'completed'; owner?: string; leaseUntil?: string; events: ConversationEvent[] }
 type OutboundRecord = { status: 'pending' | 'sent' | 'unknown'; owner?: string; leaseUntil?: string; target?: { peerId: string; messageId?: string }; text?: string; metadata?: DeliveryMetadata }
+export interface OutboundRecordSnapshot { key: string; status: 'pending' | 'sent' | 'unknown'; text?: string; metadata?: DeliveryMetadata }
 interface StateFile { inbound: Record<string, InboundRecord>; outbound: Record<string, OutboundRecord>; sequences: Record<string, number>; histories: Record<string, HistoryRecordState>; memoryTurns: Record<string, MemoryTurnRecord>; traces: TraceRecord[] }
 export type OutboundClaim = 'claimed' | 'sent' | 'pending' | 'unknown'
 interface LockOwner { token: string; pid: number; leaseUntil: string }
@@ -294,6 +295,17 @@ export class FileBridgeState implements BridgeState {
 
   listPendingOutbound(): Promise<Array<{ key: string } & OutboundEnvelope>> {
     return this.update(state => Object.entries(state.outbound).filter(([, value]) => value.status === 'pending' && value.target && value.text).map(([key, value]) => ({ key, target: value.target!, text: value.text!, ...(value.metadata ? { metadata: value.metadata } : {}) })))
+  }
+
+  /** Read-only delivery ledger projection for activity views. */
+  readOutboundRecords(): Promise<OutboundRecordSnapshot[]> {
+    const run = this.queue.then(async () => {
+      await this.assertSafePath()
+      const state = await this.read()
+      return Object.entries(state.outbound).map(([key, value]) => ({ key, status: value.status, ...(value.text !== undefined ? { text: value.text } : {}), ...(value.metadata ? { metadata: value.metadata } : {}) }))
+    })
+    this.queue = run.catch(() => undefined)
+    return run
   }
 
   markOutboundDispatched(key: string): Promise<void> {

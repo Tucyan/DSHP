@@ -23,4 +23,6 @@ export type {
 export * from './composition.js'
 export * from './state.js'
 export * from './skill-action.js'
+export * from './activity.js'
+export * from './activity-reader.js'
 export { apply, inject, name } from './plugin.js'
