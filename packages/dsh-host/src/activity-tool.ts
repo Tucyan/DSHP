@@ -1,4 +1,4 @@
-import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition, type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { ActivityQuery, ActivitySnapshot } from './activity.js'
 
 export interface ActivityToolRegistrar { register(definition: ToolDefinition): () => void }
@@ -23,7 +23,7 @@ export function registerActivityTool(registrar: ActivityToolRegistrar, read: Act
         limit: typeof args.limit === 'number' ? args.limit : 20,
         ...(typeof args.cursor === 'string' ? { cursor: args.cursor } : {}),
       }
-      return await read(query) as any
+      return await read(query) as unknown as Record<string, JsonValue>
     },
   }))
 }

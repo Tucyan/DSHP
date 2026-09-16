@@ -205,3 +205,9 @@
 - Root cause, compatibility limitations, reproduction and recovery procedure: `docs/plans/2026-09-16-qq-session-recovery.md`.
 - Full verify: 71 files / 366 tests plus lint/typecheck/build passed. Review passed; fix 08bad37 pushed and deployed after stopped-state backup.
 - Production session inspection changed from HTTP 500 to 200; deployed-code isolated resume passed. Service active/running, QQ ready, zero restarts and pending queues. No real model or QQ sends used.
+
+## 2026-09-16 daily activity context
+- Added provenance-aware visible activity normalization, delivery metadata, daily activity aggregation/reader, and foreground get_activity tool.
+- Focused verification passed: activity/state/restart/delivery/production-wake suites and dsh-host typecheck/build.
+- Full suite was started serially but exceeded the local command window after runtime durability tests; no deployment or QQ sends performed in this turn.
+- Activity counts are based on confirmed transport sends, not read receipts; legacy records without metadata are marked partial/unknown.

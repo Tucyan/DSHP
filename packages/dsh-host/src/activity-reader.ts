@@ -30,7 +30,7 @@ export class ActivityReader {
     const reasons: string[] = []
     let coverage: 'complete' | 'partial' | 'unavailable' = 'complete'
     const messages: ActivityMessage[] = []
-    let revisionParts: unknown[] = []
+    const revisionParts: unknown[] = []
     let snapshots: readonly { header: { id: string | { toString(): string } } }[]
     try { snapshots = await this.options.sessionPersistence.listSnapshots() }
     catch { return aggregateActivity(query, { messages: [], coverage: 'unavailable', reasons: ['session_persistence_unavailable'], revision: 'unavailable' }) }
