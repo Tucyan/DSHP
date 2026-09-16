@@ -203,3 +203,5 @@
 - Added a narrow compatibility adapter for the Host-owned event with the pinned SDK; existing logs remain unchanged and unrelated unknown events still reject.
 - Same server session copy now resumes successfully without model calls or QQ sends. Added actual PersistenceCoordinator read regression coverage.
 - Root cause, compatibility limitations, reproduction and recovery procedure: `docs/plans/2026-09-16-qq-session-recovery.md`.
+- Full verify: 71 files / 366 tests plus lint/typecheck/build passed. Review passed; fix 08bad37 pushed and deployed after stopped-state backup.
+- Production session inspection changed from HTTP 500 to 200; deployed-code isolated resume passed. Service active/running, QQ ready, zero restarts and pending queues. No real model or QQ sends used.

@@ -44,3 +44,13 @@ SDK 读取器虽支持 ignorable，当前 Session.append 并未提供其写入�
 
 本次修复解决已确定的会话格式故障。初始化失败的通用兜底和更细粒度错误诊断仍是后续
 可靠性改进项，不能把服务 ready 当作用户回复链路已验证。
+
+## 部署结果
+
+- 修复提交 `08bad37` 已推送并部署；停机备份位于
+  `/opt/dshp-backups/20260916-before-08bad37/runtime-workspace.tgz`。
+- 部署后相同生产会话检查接口由 HTTP 500 恢复为 HTTP 200。
+- 使用已部署代码再次隔离恢复主 Agent 和工具注册成功（无需手动注入兼容修复）。
+- 服务 active/running、NRestarts=0，QQ ready，memory/outbound 队列均为 0。
+- 用户资料、暂停设置、环境文件权限保留；Nginx 与本次部署前状态一致。
+- 未调用真实模型、未发送 QQ 测试消息；实际 QQ 回复仍需用户发送新消息验收。
