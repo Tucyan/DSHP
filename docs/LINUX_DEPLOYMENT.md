@@ -102,6 +102,12 @@ are retained for operator reconciliation and are not automatically sent again.
 Diagnostics distinguish `repairing`, `delivery_fallback`, and `delivery_unknown`.
 Heartbeat turns may end silently; user-message turns use the delivery guarantee.
 
+The foreground `get_activity` view is read-only and derives counts from real inbound
+session events plus confirmed transport ledger entries. Transport confirmation means
+the platform accepted the send; it is not a read receipt. Legacy records without
+delivery metadata are reported as partial/unknown, and activity availability does not
+block ordinary user replies.
+
 Run `corepack pnpm@11.7.0 verify` locally. Test files run serially because their
 filesystem/process integration deadlines are sensitive to parallel load. Server
 updates only run bounded builds and small isolated smoke checks.
