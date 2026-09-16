@@ -25,9 +25,14 @@ describe('production heartbeat context', () => {
     expect(() => JSON.parse(large.prompt)).not.toThrow()
     expect(large.truncated).toBe(true)
   })
-  it('excludes injected snapshots and schedule prompts from real recent conversation', () => {
+  it('includes only real user input and confirmed assistant delivery', () => {
     const user = (kind: string, text: string) => ({ type: 'user/message', time: 1788825600000, data: { source: { kind }, content: [{ type: 'text', text }] } })
-    const events = [user('user', 'real question'), user('plugin', 'internal context'), { type: 'assistant/message', time: 1788825600001, data: { message: { content: [{ type: 'text', text: 'real reply' }] } } }]
+    const events = [
+      user('user', 'real question'),
+      user('plugin', 'internal context'),
+      { type: 'assistant/message', time: 1788825600001, data: { message: { content: [{ type: 'text', text: 'unsent narration' }] } } },
+      { type: 'personal-growth/message-sent', time: 1788825600002, data: { id: 'sent-1', text: 'real reply' } },
+    ]
     expect(recentUserConversation(events).map(value => value.text)).toEqual(['real question', 'real reply'])
   })
 })

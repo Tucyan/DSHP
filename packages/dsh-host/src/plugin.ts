@@ -26,6 +26,7 @@ import { createDshModelSettings } from './admin/model-settings.js'
 import { startAdminServer } from './admin/server.js'
 import { requestHiddenAction } from './hidden-action.js'
 import { buildHeartbeatContext, recentUserConversation } from './heartbeat-context.js'
+import { normalizeVisibleMessages } from './activity.js'
 import { executeSkillAction } from './skill-action.js'
 import { DreamBatchStore, DREAM_PROPOSAL_CONTRACT } from './dream-batch.js'
 import { registerSendMessageTool, type SendMessage, type SendMessageToolRegistrar } from './send-message.js'
@@ -738,38 +739,13 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       scheduleCandidates.delete(occurrenceId)
     }
   }
-  const turnEvents = new Map<string, Map<number, Array<{ seq: number; type: string; data: unknown }>>>()
+  const turnEvents = new Map<string, Map<number, Array<{ seq: number; type: string; time?: number; data: unknown }>>>()
   const activeTurns = new Map<string, number>()
   const maintenanceTasks = new Set<Promise<unknown>>()
-  const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
-    const userData = events.find(value => value.type === 'user/message')?.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } } | undefined
-    const source = userData?.source ?? userData?.message?.source
-    const isUserOwnedTurn = source?.kind === 'user'
-    const isHostWake = source?.kind === 'plugin' && source.plugin === name
-    const hasSentMessages = events.some(event => event.type === 'personal-growth/message-sent')
-    const sentIds = new Set<string>()
-    const messages: Array<{ role: 'user' | 'assistant'; content: string; at: string }> = []
-    for (const event of events) {
-      if (event.type === 'personal-growth/message-sent') {
-        const data = event.data as { id?: string; text?: string }
-        if (typeof data.id === 'string' && typeof data.text === 'string' && data.text.trim() && !sentIds.has(data.id)) {
-          sentIds.add(data.id)
-          messages.push({ role: 'assistant', content: data.text, at: new Date().toISOString() })
-        }
-        continue
-      }
-      if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
-      const data = event.data as { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }>; message?: { source?: { kind?: string; plugin?: string; form?: string }; content?: Array<{ type?: string; text?: string }> } }
-      const message = event.type === 'user/message' ? (Array.isArray(data.content) ? data : data.message) : data.message
-      const content = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
-      const source = message?.source
-      const isInjectedSnapshot = source?.kind === 'plugin' && source.plugin === name && source.form === 'snapshot'
-      if (event.type === 'assistant/message' && (isHostWake || (isUserOwnedTurn && hasSentMessages))) continue
-      if (!content.trim() || (event.type === 'user/message' && sessionId === sessionIdForPeer(allowedPeerId) && isInjectedSnapshot)) continue
-      messages.push({ role: event.type === 'user/message' ? 'user' : 'assistant', content, at: new Date().toISOString() })
-    }
+  const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; time?: number; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
+    const messages = normalizeVisibleMessages(events, { sessionId, includePluginUsers: true })
     if (!messages.length) return
-    const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, ...message }))
+    const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, role: message.role, content: message.text, at: message.at }))
     if (!bridgeState.claimMemoryTurnBatch) throw new Error('personal-growth-dsh-host requires atomic memory-turn claims')
     const batch = await bridgeState.claimMemoryTurnBatch(turnKey, sessionId, inputs)
     if (batch.status === 'completed' || batch.status === 'pending') return
@@ -811,9 +787,9 @@ export function apply(ctx: Context, config: DshHostConfig): void {
       if (event.type === 'turn/start' && declaredTurn !== undefined) activeTurns.set(sessionId, declaredTurn)
       const turn = declaredTurn ?? activeTurns.get(sessionId)
       if (turn !== undefined) {
-        const byTurn = turnEvents.get(sessionId) ?? new Map<number, Array<{ seq: number; type: string; data: unknown }>>()
+        const byTurn = turnEvents.get(sessionId) ?? new Map<number, Array<{ seq: number; type: string; time?: number; data: unknown }>>()
         const values = byTurn.get(turn) ?? []
-        values.push({ seq: event.seq, type: event.type, data: event.data })
+        values.push({ seq: event.seq, type: event.type, time: event.time, data: event.data })
         byTurn.set(turn, values)
         turnEvents.set(sessionId, byTurn)
       }

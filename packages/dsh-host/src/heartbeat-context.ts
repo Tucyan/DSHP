@@ -11,20 +11,7 @@ export interface HeartbeatContextSources {
 
 /** Caller supplies events from the fixed foreground session only. */
 export function recentUserConversation(events: readonly unknown[]): RecentMessage[] {
-  const result: RecentMessage[] = []
-  let userTurn = false
-  for (const raw of events) {
-    const event = raw as { type: string; time: number; data: { source?: { kind?: string }; content?: Array<{ type: string; text?: string }>; message?: { content?: Array<{ type: string; text?: string }> } } }
-    if (event.type === 'turn/start' || event.type === 'turn/end') userTurn = false
-    if (event.type === 'user/message' && event.data.source?.kind === 'user') userTurn = true
-    if (!userTurn) continue
-    const isUser = event.type === 'user/message' && event.data.source?.kind === 'user'
-    if (!isUser && event.type !== 'assistant/message') continue
-    const content = isUser ? event.data.content : event.data.message?.content
-    const text = content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('')
-    if (text && Number.isFinite(event.time)) result.push({ role: isUser ? 'user' : 'assistant', text: text.slice(0, 1000), at: new Date(event.time).toISOString() })
-  }
-  return result.slice(-12)
+  return normalizeVisibleMessages(events as never[], { includePluginUsers: false }).slice(-12).map(message => ({ role: message.role, text: message.text, at: message.at }))
 }
 
 /** Immutable per-wake snapshot. Error payloads and internal prompts never become context. */
@@ -52,3 +39,4 @@ export async function buildHeartbeatContext(sources: HeartbeatContextSources, tr
   if (Buffer.byteLength(prompt) > 12000) throw new Error('heartbeat_context_exceeds_budget')
   return { ready: entries.every(([, entry]) => entry.status === 'available'), prompt, truncated: truncated || snapshot.truncated, sources: entries.map(([name, entry]) => ({ name, status: entry.status })) }
 }
+import { normalizeVisibleMessages } from './activity.js'

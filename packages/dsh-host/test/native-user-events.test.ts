@@ -65,7 +65,7 @@ describe('native DSH user events', () => {
       await until(() => consumed.length === 2 && wakes.length === 1)
 
       expect(consumed.map(events => events.map(event => (event as { content: string }).content))).toEqual([
-        ['scheduled prompt', 'scheduled reply'],
+        ['scheduled prompt'],
         ['direct user prompt', '阶段一', '最终结论'],
       ])
       expect(wakes).toHaveLength(1)
