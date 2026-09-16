@@ -42,7 +42,7 @@ export function normalizeVisibleMessages(events: readonly ActivityEvent[], optio
     if (event.type !== 'user/message') continue
     const message = Array.isArray(data.content) ? data as MessageLike : data.message
     const source = message?.source
-    if (source?.kind !== 'user' && (!includePluginUsers || source?.kind !== 'plugin' || source.plugin === 'personal-growth-dsh-host')) continue
+    if (source?.kind !== 'user' && (!includePluginUsers || source?.kind !== 'plugin' || source.plugin === 'personal-growth-dsh-host' || !/schedule/i.test(source.plugin ?? ''))) continue
     if (source?.kind === 'plugin' && source.plugin === 'personal-growth-dsh-host') continue
     const text = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
     const eventTime = typeof event.time === 'string' ? Date.parse(event.time) : event.time

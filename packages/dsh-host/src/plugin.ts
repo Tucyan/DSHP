@@ -743,7 +743,21 @@ export function apply(ctx: Context, config: DshHostConfig): void {
   const activeTurns = new Map<string, number>()
   const maintenanceTasks = new Set<Promise<unknown>>()
   const consumeStandaloneTurn = async (sessionId: string, events: readonly { seq: number; type: string; time?: number; data: unknown }[], turnKey = `${sessionId}:turn:${events.at(-1)?.seq ?? 'unknown'}`): Promise<void> => {
-    const messages = normalizeVisibleMessages(events, { sessionId, includePluginUsers: false })
+    const messages = normalizeVisibleMessages(events, { sessionId, includePluginUsers: true })
+    const scheduleTurn = events.some(event => {
+      if (event.type !== 'user/message') return false
+      const data = event.data as { source?: { kind?: string; plugin?: string }; message?: { source?: { kind?: string; plugin?: string } } }
+      const source = data.source ?? data.message?.source
+      return source?.kind === 'plugin' && /schedule/i.test(source.plugin ?? '')
+    })
+    if (scheduleTurn) {
+      for (const event of events) {
+        if (event.type !== 'assistant/message' || !event.time) continue
+        const data = event.data as { message?: { content?: Array<{ type?: string; text?: string }> } }
+        const content = data.message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
+        if (content.trim()) messages.push({ id: `${sessionId}:assistant:${event.seq}`, role: 'assistant', text: content, at: new Date(event.time).toISOString() })
+      }
+    }
     if (!messages.length) return
     const inputs: MemoryTurnInput[] = messages.map(message => ({ sessionId, role: message.role, content: message.text, at: message.at, ...(message.source ? { source: message.source } : {}) }))
     if (!bridgeState.claimMemoryTurnBatch) throw new Error('personal-growth-dsh-host requires atomic memory-turn claims')
